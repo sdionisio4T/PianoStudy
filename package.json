@@ -1,0 +1,17 @@
+{
+  "name": "pianostudy",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "PianoStudy - Aplicacion de estudio para pianistas",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0"
+  }
+}

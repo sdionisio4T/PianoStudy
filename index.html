@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0a">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta http-equiv="Content-Security-Policy" 
+          content="default-src 'self'; 
+                   script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdnjs.cloudflare.com https://www.youtube.com https://www.youtube-nocookie.com https://unpkg.com https://cdn.jsdelivr.net; 
+                   style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; 
+                   font-src 'self' https://cdnjs.cloudflare.com https://fonts.gstatic.com;
+                   img-src 'self' data: https://i.ytimg.com https://upload.wikimedia.org https://wsrv.nl; 
+                   connect-src 'self' https://cdn.jsdelivr.net https://unpkg.com https://mtejpgwjdhzuqrqfdlud.supabase.co wss://mtejpgwjdhzuqrqfdlud.supabase.co https://generativelanguage.googleapis.com; 
+                   frame-src https://www.youtube.com https://www.youtube-nocookie.com; 
+                   media-src 'self' blob: https://mtejpgwjdhzuqrqfdlud.supabase.co;">
+    <title>PianoStudy - Estudio para Pianistas</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+
+    <!-- Supabase -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+    <!-- YouTube IFrame API -->
+    <script defer src="https://www.youtube.com/iframe_api"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/essentia.js/dist/essentia-wasm.umd.js"></script>
+    <script defer src="https://unpkg.com/essentia.js/dist/essentia.js-core.umd.js"></script>
+    <script defer src="https://unpkg.com/@spotify/basic-pitch/dist/basic-pitch.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <i class="fas fa-music"></i>
+                <h1>PianoStudy</h1>
+            </div>
+            <div class="user-section" style="display:flex;align-items:center;gap:0.75rem;">
+                <div id="user-info" class="user-info hidden">
+                    <img id="user-avatar" src="" alt="User">
+                    <span id="user-name"></span>
+                </div>
+                <div id="auth-user-section" style="display:flex;align-items:center;gap:0.5rem;"></div>
+            </div>
+        </header>
+
+        <!-- Mobile top bar timer — direct child of app-container so position:fixed works -->
+        <div class="mobile-timer-bar" id="mobile-timer-bar" aria-label="Cronómetro">
+            <div class="mobile-timer-strip" id="mobile-timer-strip">
+                <span class="mobile-timer-strip-icon">⏱️</span>
+                <span class="mobile-timer-time mobile-timer-time--small" id="mobile-timer-time-strip">00:00:00</span>
+            </div>
+            <div class="mobile-timer-expanded" id="mobile-timer-expanded">
+                <span class="mobile-timer-time" id="mobile-timer-time">00:00:00</span>
+                <button id="mobile-timer-start" class="mobile-timer-btn" title="Iniciar / Reanudar" aria-label="Iniciar">▶</button>
+                <button id="mobile-timer-stop" class="mobile-timer-btn mobile-timer-btn--stop" title="Terminar" aria-label="Terminar" disabled>⏹</button>
+            </div>
+            <button class="mobile-timer-toggle" id="mobile-timer-toggle" aria-label="Colapsar cronómetro">
+                <i class="fas fa-chevron-up" id="mobile-timer-chevron"></i>
+            </button>
+        </div>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <nav class="nav-menu">
+                    <button class="nav-item active" data-section="dashboard">
+                        <i class="fas fa-home"></i><span>Inicio</span>
+                    </button>
+
+                    <!-- Nav Timer (between Inicio and Grabar) -->
+                    <div class="nav-timer" id="nav-timer" aria-label="Cronómetro de práctica">
+                        <!-- Title row — always visible, toggles collapse -->
+                        <button class="nav-timer-header" id="nav-timer-header" aria-label="Expandir/Colapsar cronómetro">
+                            <i class="fas fa-stopwatch nav-timer-header-icon" id="nav-timer-collapsed-icon"></i>
+                            <span class="nav-timer-header-label">Sesión de hoy</span>
+                            <i class="fas fa-chevron-up nav-timer-chevron" id="nav-timer-chevron"></i>
+                        </button>
+                        <!-- Expanded body -->
+                        <div class="nav-timer-expanded" id="nav-timer-expanded">
+                            <div class="nav-timer-time" id="practice-timer-time">00:00:00</div>
+                            <div class="nav-timer-actions">
+                                <button id="practice-timer-start" class="nav-timer-btn" title="Iniciar / Reanudar" aria-label="Iniciar">▶</button>
+                                <button id="practice-timer-stop" class="nav-timer-btn nav-timer-btn--stop" title="Terminar sesión" aria-label="Terminar" disabled>⏹</button>
+                            </div>
+                            <div class="nav-timer-today">Total hoy: <span id="practice-timer-today">00:00:00</span></div>
+                        </div>
+                    </div>
+
+                    <button class="nav-item" data-section="recorder">
+                        <i class="fas fa-microphone"></i><span>Grabar</span>
+                    </button>
+                    <button class="nav-item" data-section="licks">
+                        <i class="fas fa-guitar"></i><span>Licks</span>
+                    </button>
+                    <button class="nav-item" data-section="phrases">
+                        <i class="fas fa-cut"></i><span>Frases</span>
+                    </button>
+                    <button class="nav-item" data-section="ai-analysis">
+                        <i class="fas fa-brain"></i><span>Análisis</span>
+                    </button>
+                    <button class="nav-item" data-section="artists">
+                        <i class="fas fa-users"></i><span>Artistas</span>
+                    </button>
+                    <button class="nav-item" data-section="progress">
+                        <i class="fas fa-trophy"></i><span>Progreso</span>
+                    </button>
+                    <button class="nav-item" data-section="search">
+                        <i class="fas fa-search"></i><span>Buscar</span>
+                    </button>
+                    <button class="nav-item" data-section="favorites">
+                        <i class="fas fa-heart"></i><span>Favoritas</span>
+                    </button>
+                    <button class="nav-item" data-section="settings">
+                        <i class="fas fa-cog"></i><span>Ajustes</span>
+                    </button>
+                </nav>
+            </aside>
+
+            <!-- Content Area -->
+            <section class="content">
+                <!-- Dashboard Section -->
+                <div id="dashboard" class="section active">
+                    <h2>Bienvenido a PianoStudy</h2>
+
+                    <div class="context-help">
+                        <i class="fas fa-circle-info" aria-hidden="true"></i>
+                        <p>Aquí ves un resumen de tu actividad reciente: grabaciones, licks y tu progreso general.</p>
+                    </div>
+                    <div class="dashboard-grid">
+                        <div class="dashboard-card">
+                            <i class="fas fa-microphone-alt"></i>
+                            <h3>Grabación Rápida</h3>
+                            <p>Comienza a grabar tu sesión de práctica</p>
+                            <button class="btn-primary nav-link" data-section="recorder">
+                                <i class="fas fa-play"></i> Empezar
+                            </button>
+                        </div>
+                        <div class="dashboard-card">
+                            <i class="fas fa-lightbulb"></i>
+                            <h3>Lick Recomendado</h3>
+                            <p id="recommended-lick">Cargando recomendación...</p>
+                            <button class="btn-secondary nav-link" data-section="licks">
+                                <i class="fas fa-list"></i> Ver todos
+                            </button>
+                        </div>
+                        <div class="dashboard-card">
+                            <i class="fas fa-headphones"></i>
+                            <h3>Artista del Día</h3>
+                            <div id="artist-recommendation" style="display:flex;flex-direction:column;gap:0.25rem;text-align:left">
+                                <span style="color:var(--text-secondary);font-size:0.85rem">Cargando…</span>
+                            </div>
+                            <button class="btn-secondary nav-link" data-section="artists" style="margin-top:0.5rem">
+                                <i class="fas fa-users"></i> Ver todos
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Recorder Section -->
+                <div id="recorder" class="section">
+                    <h2>Grabador de Sesiones</h2>
+
+                    <div class="context-help">
+                        <i class="fas fa-circle-info" aria-hidden="true"></i>
+                        <p>Graba tus sesiones de práctica seleccionando tu micrófono. Puedes reproducir y eliminar grabaciones anteriores.</p>
+                    </div>
+                    
+                    <!-- Device Selector -->
+                    <div class="device-selector">
+                        <label for="audio-device">Dispositivo de Audio:</label>
+                        <select id="audio-device">
+                            <option value="">Seleccionar dispositivo...</option>
+                        </select>
+                        <button id="refresh-devices" class="btn-small">
+                            <i class="fas fa-sync"></i> Actualizar
+                        </button>
+                    </div>
+
+                    <!-- Recording Controls -->
+                    <div class="recording-controls">
+                        <div class="visualizer">
+                            <div class="recording-indicator hidden" id="recording-indicator">
+                                <div class="recording-dot"></div>
+                                <span class="recording-text">GRABANDO</span>
+                                <span class="recording-time" id="recording-time">00:00</span>
+                            </div>
+                            <canvas id="waveform" width="800" height="200"></canvas>
+                            <div class="level-meters">
+                                <div class="level-meter">
+                                    <div class="level-bar" id="left-level"></div>
+                                    <span>L</span>
+                                </div>
+                                <div class="level-meter">
+                                    <div class="level-bar" id="right-level"></div>
+                                    <span>R</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="controls">
+                            <button id="record-btn" class="btn-record">
+                                <i class="fas fa-circle"></i> Grabar
+                            </button>
+                            <button id="play-btn" class="btn-play" disabled>
+                                <i class="fas fa-play"></i> Reproducir
+                            </button>
+                            <button id="stop-btn" class="btn-stop" disabled>
+                                <i class="fas fa-stop"></i> Detener
+                            </button>
+                            <button id="cut-phrases-btn" class="btn-save" disabled>
+                                <i class="fas fa-cut"></i> Cortar Frases
+                            </button>
+                            <button id="analyze-recording-btn" class="btn-analyze" disabled>
+                                <i class="fas fa-brain"></i> Analizar con IA
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Backing Track -->
+                    <div class="backing-track">
+                        <h3>Backing Track</h3>
+                        <div class="track-controls">
+                            <input type="file" id="backing-track-file" accept="audio/*">
+                            <button id="play-backing" class="btn-small">
+                                <i class="fas fa-play"></i> Reproducir
+                            </button>
+                            <button id="stop-backing" class="btn-small">
+                                <i class="fas fa-stop"></i> Detener
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Recording List -->
+                    <div class="recording-list">
+                        <div class="recording-list-header">
+                            <h3>Grabaciones Temporales</h3>
+                            <button class="btn-small btn-danger" id="temp-delete-all-btn" title="Borrar todas las grabaciones" style="display:none">
+                                <i class="fas fa-trash"></i> Borrar todas
+                            </button>
+                        </div>
+                        <div id="temp-recordings" class="temp-recordings-list">
+                            <p class="no-recordings">No hay grabaciones aún</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Licks Section -->
+                <div id="licks" class="section">
+                    <h2>Mis Licks</h2>
+
+                    <div class="context-help">
+                        <i class="fas fa-circle-info" aria-hidden="true"></i>
+                        <p>Guarda tus licks favoritos organizados por estilo musical. Arrástralos para reordenarlos y asígnalos a tu cola de estudio.</p>
+                    </div>
+                    <div class="licks-header">
+                        <button id="add-lick" class="btn-primary">
+                            <i class="fas fa-plus"></i> Nuevo Lick
+                        </button>
+                        <select id="style-filter">
+                            <option value="all">Todos los estilos</option>
+                            <option value="blues">Blues</option>
+                            <option value="bebop">Bebop</option>
+                            <option value="hardbop">Hard-bop</option>
+                            <option value="latinjazz">Latin Jazz</option>
+                            <option value="soncubano">Son Cubano</option>
+                            <option value="bolero">Bolero</option>
+                            <option value="jazzcolombiano">Jazz Colombiano</option>
+                        </select>
+                    </div>
+
+                    <div id="study-player" class="study-player">
+                        <div class="study-player-header">
+                            <h3><i class="fas fa-repeat"></i> Study Player (Loop)</h3>
+                            <div class="study-player-actions">
+                                <div class="study-speed">
+                                    <label for="study-speed">Velocidad</label>
+                                    <input id="study-speed" type="range" min="0.5" max="1.5" step="0.05" value="1" />
+                                    <span id="study-speed-label">1.00x</span>
+                                </div>
+                                <button class="btn-small" data-action="study-toggle-loop" data-value="on">
+                                    <i class="fas fa-redo"></i> Loop: ON
+                                </button>
+                                <button class="btn-small btn-danger" data-action="study-clear">
+                                    <i class="fas fa-trash"></i> Limpiar cola
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="study-now-playing">
+                            <div class="study-title">
+                                <span class="label">Ahora:</span>
+                                <strong id="study-now-title">Arrastra un lick aquí</strong>
+                            </div>
+                            <div class="study-controls">
+                                <button class="btn-small" data-action="study-prev">
+                                    <i class="fas fa-step-backward"></i>
+                                </button>
+                                <button class="btn-primary" data-action="study-play">
+                                    <i class="fas fa-play"></i> Play
+                                </button>
+                                <button class="btn-small" data-action="study-pause">
+                                    <i class="fas fa-pause"></i>
+                                </button>
+                                <button class="btn-small" data-action="study-next">
+                                    <i class="fas fa-step-forward"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div id="study-dropzone" class="study-dropzone">
+                            <div class="study-dropzone-hint">
+                                Arrastra licks aquí para crear una cola de estudio
+                            </div>
+                            <div id="study-queue" class="study-queue"></div>
+                        </div>
+                    </div>
+
+                    <div id="licks-list" class="licks-list">
+                        <!-- Licks will be loaded here -->
+                    </div>
+                </div>
+
+                <!-- Phrases Section -->
+                <div id="phrases" class="section">
+                    <h2>Frases de YouTube</h2>
+
+                    <div class="context-help">
+                        <i class="fas fa-circle-info" aria-hidden="true"></i>
+                        <p>Recorta y guarda fragmentos destacados de tus grabaciones para practicarlos por separado.</p>
+                    </div>
+                    <!-- YouTube Study Section -->
+                    <div class="legal-notice">
+                        <p>⚠️ <strong>Uso Educativo:</strong> Esta función es solo para estudio personal. 
+                        Respeta los derechos de autor del contenido de YouTube.</p>
+                    </div>
+
+                    <div class="youtube-add-section">
+                        <h3>Agregar Video para Estudio</h3>
+                        <div class="youtube-input-group">
+                            <input type="text" 
+                                   id="youtube-url-input" 
+                                   placeholder="Pega URL de YouTube aquí (ej: https://youtube.com/watch?v=...)"
+                                   class="youtube-url-input">
+                            <button id="load-youtube-btn" class="btn-primary">
+                                <i class="fas fa-plus"></i> Cargar Video
+                            </button>
+                        </div>
+                        <p class="youtube-help-text">
+                            💡 Solo para estudio personal. Respeta los derechos de autor.
+                        </p>
+                    </div>
+
+                    <div id="youtube-player-container" class="youtube-player-container hidden">
+                        <h3>Video Cargado</h3>
+                        <div class="video-info">
+                            <p id="video-title" class="video-title"></p>
+                        </div>
+                        <div id="youtube-player"></div>
+
+                        <div class="timestamp-controls">
+                            <div class="time-display">
+                                <span>Tiempo actual: </span>
+                                <span id="current-time" class="current-time">0:00</span>
+                                <span> / </span>
+                                <span id="total-time" class="total-time">0:00</span>
+                            </div>
+
+                            <div class="mark-controls">
+                                <button id="mark-start-btn" class="btn-secondary">
+                                    <i class="fas fa-flag"></i> Marcar Inicio
+                                </button>
+                                <button id="mark-end-btn" class="btn-secondary">
+                                    <i class="fas fa-flag-checkered"></i> Marcar Final
+                                </button>
+                                <button id="play-segment-btn" class="btn-primary" disabled>
+                                    <i class="fas fa-play"></i> Reproducir Segmento
+                                </button>
+                            </div>
+
+                            <div id="segment-preview" class="segment-preview hidden">
+                                <p>Segmento seleccionado:</p>
+                                <div class="segment-info">
+                                    <span class="segment-start">Inicio: <strong id="segment-start-display">0:00</strong></span>
+                                    <span class="segment-duration">Duración: <strong id="segment-duration-display">0s</strong></span>
+                                    <span class="segment-end">Final: <strong id="segment-end-display">0:00</strong></span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="save-phrase-section">
+                            <h4>Guardar Frase Musical</h4>
+                            <div class="phrase-form">
+                                <input type="text" 
+                                       id="phrase-name-input" 
+                                       placeholder="Nombre de la frase (ej: 'Intro de Take Five')"
+                                       class="phrase-name-input">
+
+                                <select id="phrase-style-select" class="phrase-style-select">
+                                    <option value="">Selecciona estilo...</option>
+                                    <option value="blues">Blues</option>
+                                    <option value="bebop">Bebop</option>
+                                    <option value="hardbop">Hard-bop</option>
+                                    <option value="latinjazz">Latin Jazz</option>
+                                    <option value="soncubano">Son Cubano</option>
+                                    <option value="bolero">Bolero</option>
+                                    <option value="jazzcolombiano">Jazz Colombiano</option>
+                                </select>
+
+                                <textarea id="phrase-notes-input" 
+                                          placeholder="Notas sobre la frase (acordes, técnica, etc.)"
+                                          class="phrase-notes-input"
+                                          rows="3"></textarea>
+
+                                <button id="save-youtube-phrase-btn" class="btn-primary" disabled>
+                                    <i class="fas fa-save"></i> Guardar Frase
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="saved-phrases-section">
+                        <h3>Mis Frases de YouTube</h3>
+                        <div class="phrases-filter">
+                            <select id="youtube-phrases-filter" class="style-filter">
+                                <option value="all">Todos los estilos</option>
+                                <option value="blues">Blues</option>
+                                <option value="bebop">Bebop</option>
+                                <option value="hardbop">Hard-bop</option>
+                                <option value="latinjazz">Latin Jazz</option>
+                                <option value="soncubano">Son Cubano</option>
+                                <option value="bolero">Bolero</option>
+                                <option value="jazzcolombiano">Jazz Colombiano</option>
+                            </select>
+                        </div>
+                        <div id="youtube-phrases-list" class="youtube-phrases-list">
+                            <p class="no-data">No hay frases guardadas todavía</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- AI Analysis Section -->
+                <div id="ai-analysis" class="section">
+                    <h2>Análisis de IA</h2>
+
+                    <div class="context-help">
+                        <i class="fas fa-circle-info" aria-hidden="true"></i>
+                        <p>Graba algo y analízalo para recibir feedback sobre tu tempo, dinámica y expresividad. Requiere una API key de Google Gemini (gratuita).</p>
+                    </div>
+                    
+                    <!-- Selector de grabación -->
+                    <div class="analysis-selector">
+                        <h3>Selecciona grabación para analizar</h3>
+                        <select id="analysis-recording-select" class="recording-select">
+                            <option value="">Selecciona una grabación...</option>
+                        </select>
+                        <button id="start-analysis-btn" class="btn-primary" disabled>
+                            <i class="fas fa-brain"></i> Analizar Grabación
+                        </button>
+                    </div>
+
+                    <!-- Estado de análisis -->
+                    <div id="analysis-status" class="analysis-status hidden">
+                        <div class="loading-spinner"></div>
+                        <p class="status-text">Analizando tu interpretación...</p>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="analysis-progress"></div>
+                        </div>
+                    </div>
+
+                    <!-- Resultados del análisis -->
+                    <div id="analysis-results" class="analysis-results hidden">
+                        <div class="analysis-section">
+                            <h3><i class="fas fa-chart-line"></i> Resumen General</h3>
+                            <div class="summary-cards">
+                                <div class="summary-card">
+                                    <div class="card-icon">🎵</div>
+                                    <div class="card-content">
+                                        <div class="card-label">Tempo Detectado</div>
+                                        <div class="card-value" id="detected-tempo">-- BPM</div>
+                                    </div>
+                                </div>
+                                <div class="summary-card">
+                                    <div class="card-icon">🎹</div>
+                                    <div class="card-content">
+                                        <div class="card-label">Tonalidad</div>
+                                        <div class="card-value" id="detected-key">--</div>
+                                    </div>
+                                </div>
+                                <div class="summary-card">
+                                    <div class="card-icon">⭐</div>
+                                    <div class="card-content">
+                                        <div class="card-label">Puntuación</div>
+                                        <div class="card-value" id="overall-score">--/10</div>
+                                    </div>
+                                </div>
+                                <div class="summary-card">
+                                    <div class="card-icon">⏱️</div>
+                                    <div class="card-content">
+                                        <div class="card-label">Duración</div>
+                                        <div class="card-value" id="recording-duration">--</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="analysis-section">
+                            <h3><i class="fas fa-music"></i> Análisis Musical</h3>
+                            <div class="analysis-content" id="musical-analysis"></div>
+                        </div>
+
+                        <div class="analysis-section technical-metrics-section">
+                            <h3><i class="fas fa-sliders-h"></i> Métricas detectadas</h3>
+                            <div class="technical-metrics-grid">
+                                <div class="technical-card">
+                                    <div class="technical-label">BPM real</div>
+                                    <div class="technical-value" id="metric-bpm-value">-- BPM</div>
+                                    <div class="confidence-bar"><span id="metric-bpm-confidence"></span></div>
+                                    <div class="technical-hint" id="metric-bpm-confidence-text">Confianza --%</div>
+                                </div>
+                                <div class="technical-card">
+                                    <div class="technical-label">Tonalidad detectada</div>
+                                    <div class="technical-value" id="metric-key-value">--</div>
+                                    <div class="confidence-bar"><span id="metric-key-strength"></span></div>
+                                    <div class="technical-hint" id="metric-key-strength-text">Fuerza --%</div>
+                                </div>
+                                <div class="technical-card">
+                                    <div class="technical-label">Complejidad dinámica</div>
+                                    <div class="dynamic-gauge">
+                                        <span id="metric-dynamic-gauge"></span>
+                                    </div>
+                                    <div class="technical-hint" id="metric-dynamic-text">--</div>
+                                </div>
+                            </div>
+                            <div id="midi-notes-container" class="midi-notes-container hidden">
+                                <h4>Notas detectadas (Basic Pitch)</h4>
+                                <div id="midi-notes-list" class="midi-notes-list"></div>
+                            </div>
+                        </div>
+
+                        <div class="analysis-section positive-section">
+                            <h3><i class="fas fa-thumbs-up"></i> Aspectos Positivos</h3>
+                            <div class="feedback-list" id="positive-feedback"></div>
+                        </div>
+
+                        <div class="analysis-section improvement-section">
+                            <h3><i class="fas fa-bullseye"></i> Áreas de Mejora</h3>
+                            <div class="feedback-list" id="improvement-feedback"></div>
+                        </div>
+
+                        <div class="analysis-section">
+                            <h3><i class="fas fa-lightbulb"></i> Sugerencias de Práctica</h3>
+                            <div class="practice-suggestions" id="practice-suggestions"></div>
+                        </div>
+
+                        <div class="analysis-section">
+                            <h3><i class="fas fa-waveform-path"></i> Análisis Temporal</h3>
+                            <div class="analysis-audio-player">
+                                <audio id="analysis-audio" controls></audio>
+                                <div class="segment-controls">
+                                    <div class="segment-row">
+                                        <label for="segment-start">Inicio (s)</label>
+                                        <input id="segment-start" type="number" min="0" step="0.1" value="0">
+                                    </div>
+                                    <div class="segment-row">
+                                        <label for="segment-end">Fin (s)</label>
+                                        <input id="segment-end" type="number" min="0" step="0.1" value="0">
+                                    </div>
+                                    <button id="play-segment-audio-btn" class="btn-small">
+                                        <i class="fas fa-play"></i> Reproducir segmento
+                                    </button>
+                                </div>
+                            </div>
+                            <canvas id="analysis-waveform" class="analysis-waveform" width="900" height="200"></canvas>
+                            <div class="waveform-legend">
+                                <span class="legend-item"><span class="legend-color good"></span> Secciones bien ejecutadas</span>
+                                <span class="legend-item"><span class="legend-color improve"></span> Secciones a mejorar</span>
+                            </div>
+                        </div>
+
+                        <div class="analysis-section">
+                            <h3><i class="fas fa-comments"></i> Pregúntale a la IA</h3>
+                            <div class="analysis-chat">
+                                <div id="analysis-chat-messages" class="chat-messages"></div>
+                                <div class="chat-input-row">
+                                    <textarea id="analysis-chat-input" rows="2" placeholder="Ej: ¿En qué partes me fui de tempo y cómo lo practico?"></textarea>
+                                    <button id="analysis-chat-send" class="btn-primary">
+                                        <i class="fas fa-paper-plane"></i> Enviar
+                                    </button>
+                                </div>
+                                <p class="chat-hint">Privacidad: no se envía tu audio. Solo métricas numéricas y tu pregunta.</p>
+                            </div>
+                        </div>
+
+                        <div class="analysis-actions">
+                            <button id="save-analysis-btn" class="btn-primary">
+                                <i class="fas fa-save"></i> Guardar Análisis
+                            </button>
+                            <button id="new-analysis-btn" class="btn-secondary">
+                                <i class="fas fa-redo"></i> Analizar Otra Grabación
+                            </button>
+                            <button id="export-analysis-btn" class="btn-secondary">
+                                <i class="fas fa-download"></i> Exportar análisis (.txt)
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Historial de análisis -->
+                    <div class="analysis-history">
+                        <div class="analysis-history-header">
+                            <h3>Historial de Análisis</h3>
+                        </div>
+                        <div id="analysis-history-list" class="history-list">
+                            <p class="no-data">No hay análisis guardados todavía</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Artists Section — rendered dynamically by ArtistsManager -->
+                <div id="artists" class="section"></div>
+
+                <!-- Progress Section -->
+                <div id="progress" class="section">
+                    <h2>Tu Progreso</h2>
+                    <p class="progress-motivation" id="progress-motivation">Cada gran pianista empezó con una nota. ¡Tú ya empezaste!</p>
+
+                    <div class="context-help">
+                        <i class="fas fa-circle-info" aria-hidden="true"></i>
+                        <p>Registra tus sesiones de estudio y lleva el seguimiento de tu evolución como pianista.</p>
+                    </div>
+
+                    <div class="progress-metrics" id="progress-metrics">
+                        <div class="metric-card">
+                            <div class="metric-icon">⏱️</div>
+                            <div class="metric-value" id="metric-study-time">0h 0m</div>
+                            <div class="metric-label">Tiempo de estudio</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-icon">🎵</div>
+                            <div class="metric-value" id="metric-licks">0</div>
+                            <div class="metric-label">Licks guardados</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-icon">🎙️</div>
+                            <div class="metric-value" id="metric-recordings">0</div>
+                            <div class="metric-label">Grabaciones</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-icon">🔥</div>
+                            <div class="metric-value" id="metric-streak">0 días</div>
+                            <div class="metric-label">Racha</div>
+                        </div>
+                    </div>
+
+                    <div class="progress-badges">
+                        <h3>Medallas</h3>
+                        <div class="badges-grid" id="badges-grid"></div>
+                    </div>
+
+                    <div class="progress-chart-section">
+                        <div class="chart-header">
+                            <h3>Actividad de estudio — últimos 30 días</h3>
+                            <div class="chart-stats">
+                                <span id="chart-avg">Promedio: 0m/día</span>
+                                <span id="chart-best">Mejor día: 0m</span>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="progress-chart" height="200"></canvas>
+                            <p id="progress-chart-empty" class="no-data hidden">Aún no hay sesiones registradas</p>
+                            <div id="chart-tooltip" class="chart-tooltip hidden"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Favorites Section -->
+                <div id="favorites" class="section">
+                    <div id="favorites-root"></div>
+                </div>
+
+                <!-- Search Section -->
+                <div id="search" class="section">
+                    <h2>Buscar Recursos</h2>
+
+                    <div class="context-help">
+                        <i class="fas fa-circle-info" aria-hidden="true"></i>
+                        <p>Busca entre tus licks, grabaciones y artistas desde un solo lugar.</p>
+                    </div>
+                    <div class="search-container">
+                        <input type="text" id="search-input" placeholder="Buscar backing tracks, licks, artistas...">
+                        <button id="search-btn" class="btn-primary">
+                            <i class="fas fa-search"></i> Buscar
+                        </button>
+                    </div>
+                    <div id="search-results" class="search-results">
+                        <!-- Search results will appear here -->
+                    </div>
+                </div>
+
+                <!-- Settings Section -->
+                <div id="settings" class="section">
+                    <h2>Ajustes</h2>
+                    <div class="settings-card">
+                        <div class="settings-row">
+                            <h3 style="margin:0">IA (Google Gemini)</h3>
+                            <div class="ai-status" aria-label="Estado de IA">
+                                <span id="ai-status-dot" class="ai-status-dot ai-status-dot--off" aria-hidden="true"></span>
+                                <span id="ai-status-text" class="ai-status-text">IA Inactiva</span>
+                            </div>
+                        </div>
+
+                        <small class="settings-help">La IA se ejecuta a través de nuestro servidor; no necesitas configurar ninguna API key.</small>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Modals -->
+    <div id="modal" class="modal hidden">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <div id="modal-body"></div>
+        </div>
+    </div>
+
+    <!-- Confirm Modal -->
+    <div id="confirm-modal" class="confirm-modal-overlay" aria-modal="true" role="dialog" aria-labelledby="confirm-modal-message" style="display:none">
+        <div class="confirm-modal-box">
+            <p class="confirm-modal-message" id="confirm-modal-message"></p>
+            <div class="confirm-modal-actions">
+                <button class="confirm-modal-btn confirm-modal-btn--cancel" id="confirm-modal-cancel">Cancelar</button>
+                <button class="confirm-modal-btn confirm-modal-btn--ok" id="confirm-modal-ok">Confirmar</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="assets/js/modules/auth-ui.js"></script>
+    <script type="module" src="assets/js/app/app-init.js"></script>
+</body>
+</html>

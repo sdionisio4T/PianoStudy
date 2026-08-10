@@ -1,0 +1,16 @@
+# Backups locales — pueden contener datos personales de usuarios
+# (grabaciones de audio, emails en el dump de DB). Ver scripts/backup/README.md.
+backups/
+
+# Dependencias / artefactos comunes
+node_modules/
+dist/
+
+# Vite / entornos locales con secretos (no aplica hoy, ninguna var es secreta,
+# pero se deja el patrón estándar por si a futuro se agrega algo sensible)
+.env.local
+.env.*.local
+
+# Backup del .git anterior (se movió acá al rehacer el repo desde cero — es
+# recuperable localmente pero NO tiene que entrar al historial nuevo).
+_pendiente_revision/git-old/
