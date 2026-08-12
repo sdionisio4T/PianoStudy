@@ -263,7 +263,7 @@ export async function getMyProfile() {
 
     const { data, error } = await db
         .from('user_profiles')
-        .select('plan, paid_until, ai_data_consent, ai_data_consent_at')
+        .select('plan, paid_until, ai_data_consent, ai_data_consent_at, default_style, deleted_at, deletion_scheduled_for, username, email')
         .eq('id', userId)
         .maybeSingle();
 
@@ -284,6 +284,72 @@ export async function setAiDataConsent(consent) {
         .eq('id', userId);
 
     return { error };
+}
+
+export async function setDefaultStyle(style) {
+    const userId = await getUserId();
+    if (!userId) return { error: new Error('No session') };
+
+    const { error } = await db
+        .from('user_profiles')
+        .update({ default_style: String(style || '') })
+        .eq('id', userId);
+
+    return { error };
+}
+
+// ── Cancelación de eliminación diferida ───────────────────────────────────────
+
+export async function cancelAccountDeletion() {
+    const userId = await getUserId();
+    if (!userId) return { error: new Error('No session') };
+
+    const { error } = await db
+        .from('user_profiles')
+        .update({ deleted_at: null, deletion_scheduled_for: null })
+        .eq('id', userId);
+
+    return { error };
+}
+
+// ── Export completo de datos del usuario (RGPD art. 20, portabilidad) ─────────
+
+export async function exportAllUserData() {
+    const userId = await getUserId();
+    if (!userId) return { data: null, error: new Error('No session') };
+
+    const [licks, recordings, customArtists, favoriteSongs, practiceSessions, profile] = await Promise.all([
+        db.from('licks').select('*').eq('user_id', userId),
+        db.from('recordings').select('*').eq('user_id', userId),
+        db.from('custom_artists').select('*').eq('user_id', userId),
+        db.from('favorite_songs').select('*').eq('user_id', userId),
+        db.from('practice_sessions').select('*').eq('user_id', userId),
+        db.from('user_profiles').select('*').eq('id', userId).maybeSingle(),
+    ]);
+
+    const firstErr =
+        licks.error || recordings.error || customArtists.error ||
+        favoriteSongs.error || practiceSessions.error || profile.error;
+
+    return {
+        data: {
+            exportedAt: new Date().toISOString(),
+            userId,
+            profile: profile.data || null,
+            licks: licks.data || [],
+            recordings: recordings.data || [],
+            customArtists: customArtists.data || [],
+            favoriteSongs: favoriteSongs.data || [],
+            practiceSessions: practiceSessions.data || [],
+        },
+        error: firstErr || null,
+    };
+}
+
+// Descarga el binario de una grabación (Storage → Blob).
+export async function downloadRecordingBlob(filePath) {
+    const { data, error } = await db.storage.from('recordings').download(filePath);
+    return { blob: data, error };
 }
 
 // ── UI helpers (exported for use in app.js) ───────────────────────────────────

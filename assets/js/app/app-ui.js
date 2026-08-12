@@ -2,6 +2,7 @@
 // Mezclado sobre PianoStudyApp.prototype en app-init.js.
 
 import { db } from '../modules/supabase-client.js';
+import { toast } from '../modules/Toast.js';
 
 export const uiMixin = {
     setupEventListeners() {
@@ -290,6 +291,18 @@ export const uiMixin = {
                 return;
             }
 
+            // ── Ajustes ─────────────────────────────────────────────────────
+            if (action === 'settings-save-profile')      { this.saveProfile(); return; }
+            if (action === 'settings-change-password')   { this.openChangePasswordModal(); return; }
+            if (action === 'settings-close-cp')          { this.closeChangePasswordModal(); return; }
+            if (action === 'settings-change-email')      { this.openChangeEmailModal(); return; }
+            if (action === 'settings-close-ce')          { this.closeChangeEmailModal(); return; }
+            if (action === 'settings-save-default-style'){ this.saveDefaultStyle(); return; }
+            if (action === 'settings-export-data')       { this.exportUserData(); return; }
+            if (action === 'settings-delete-account')    { this.openDeleteAccountModal(); return; }
+            if (action === 'settings-close-del')         { this.closeDeleteAccountModal(); return; }
+            if (action === 'settings-cancel-deletion')   { this.cancelPendingDeletion(); return; }
+            if (action === 'settings-keep-deletion')     { this.keepPendingDeletion(); return; }
         });
 
         document.addEventListener('change', (e) => {
@@ -379,7 +392,10 @@ export const uiMixin = {
         if (sectionName === 'progress') this.renderProgressSection();
         if (sectionName === 'artists') this.artistsManager.render();
         if (sectionName === 'favorites') this.favoriteSongsManager.render();
-        if (sectionName === 'settings') this.updateAIStatusIndicator();
+        if (sectionName === 'settings') {
+            this.updateAIStatusIndicator();
+            this.renderSettings();
+        }
     },
 
     showConfirm(message) {
@@ -414,34 +430,11 @@ export const uiMixin = {
     },
 
     showNotification(message, type = 'info') {
-        // Crear notificación
-        const notification = document.createElement('div');
-        notification.className = `notification notification-${type}`;
-        notification.textContent = message;
-        
-        // Estilos
-        notification.style.cssText = `
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            background: ${type === 'success' ? 'var(--accent-green)' : type === 'error' ? 'var(--accent-red)' : 'var(--accent-blue)'};
-            color: var(--bg-primary);
-            padding: 1rem 1.5rem;
-            border-radius: 8px;
-            font-weight: bold;
-            z-index: 10000;
-            animation: slideIn 0.3s ease;
-        `;
-        
-        document.body.appendChild(notification);
-        
-        // Remover después de 3 segundos
-        setTimeout(() => {
-            notification.style.animation = 'slideOut 0.3s ease';
-            setTimeout(() => {
-                document.body.removeChild(notification);
-            }, 300);
-        }, 3000);
+        // Delegado al sistema Toast unificado. Los tipos viejos se mapean a
+        // los nuevos: success → exito, warning → aviso, resto queda info.
+        const map = { success: 'exito', error: 'error', warning: 'aviso', info: 'info' };
+        const kind = map[type] || 'info';
+        toast[kind](message);
     },
 
     closeModal() {

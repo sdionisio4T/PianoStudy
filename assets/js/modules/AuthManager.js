@@ -2,6 +2,9 @@ import { db } from './supabase-client.js';
 
 export class AuthManager {
     // ── Crypto helpers ────────────────────────────────────────────────────────
+    // Se mantienen exportados: son usados por tests y por si se reutilizan a
+    // futuro. La recuperación de contraseña ya NO usa hashPassword (ver
+    // sendPasswordResetEmail más abajo).
 
     generateSalt() {
         const bytes = new Uint8Array(16);
@@ -9,9 +12,6 @@ export class AuthManager {
         return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
     }
 
-    // PBKDF2-SHA256, 100k iteraciones — protege las respuestas de seguridad
-    // (cortas y adivinables) contra brute-force por GPU, a diferencia de un
-    // SHA-256 directo que es demasiado rápido para ese propósito.
     async hashPassword(password, salt) {
         const encoder = new TextEncoder();
         const keyMaterial = await crypto.subtle.importKey(
@@ -76,13 +76,11 @@ export class AuthManager {
 
     // ── Registration ──────────────────────────────────────────────────────────
 
-    async register({ fullName, username, email, password, securityQuestion, securityAnswer }) {
+    async register({ fullName, username, email, password }) {
         const name = String(fullName || '').trim();
         const user = String(username || '').trim();
         const mail = String(email || '').trim().toLowerCase();
         const pass = String(password || '');
-        const question = String(securityQuestion || '').trim();
-        const answer = String(securityAnswer || '').trim().toLowerCase();
 
         if (!name) return { ok: false, error: 'El nombre completo es obligatorio.' };
 
@@ -95,12 +93,6 @@ export class AuthManager {
         const passErr = this.validatePassword(pass);
         if (passErr) return { ok: false, error: passErr };
 
-        if (!question) return { ok: false, error: 'Selecciona una pregunta de seguridad.' };
-        if (answer.length < 2) return { ok: false, error: 'La respuesta de seguridad es demasiado corta.' };
-
-        const answerSalt = this.generateSalt();
-        const answerHash = await this.hashPassword(answer, answerSalt);
-
         try {
             const { data, error } = await db.auth.signUp({
                 email: mail,
@@ -108,10 +100,7 @@ export class AuthManager {
                 options: {
                     data: {
                         username: user,
-                        displayName: name,
-                        securityQuestion: question,
-                        answerSalt,
-                        answerHash
+                        displayName: name
                     }
                 }
             });
@@ -123,8 +112,7 @@ export class AuthManager {
                 await db.from('user_profiles').upsert({
                     id: data.user.id,
                     email: mail,
-                    username: user,
-                    security_question: question
+                    username: user
                 }, { onConflict: 'id' });
             } catch (profileErr) {
                 console.warn('register: could not upsert user_profiles:', profileErr);
@@ -145,18 +133,8 @@ export class AuthManager {
 
         if (!user || !pass) return { ok: false, error: 'Usuario o contraseña incorrectos.' };
 
-        let mail = user;
-        if (!user.includes('@')) {
-            try {
-                const { data: rpcData, error: rpcErr } = await db.rpc('get_email_by_username', { p_username: user });
-                if (rpcErr || !rpcData) {
-                    return { ok: false, error: 'Usuario no encontrado. Ingresa tu email o verifica tu usuario.' };
-                }
-                mail = rpcData;
-            } catch {
-                return { ok: false, error: 'Usuario no encontrado. Ingresa tu email o verifica tu usuario.' };
-            }
-        }
+        const mail = await this._resolveEmail(user);
+        if (!mail) return { ok: false, error: 'Usuario no encontrado. Ingresa tu email o verifica tu usuario.' };
 
         try {
             const { data, error } = await db.auth.signInWithPassword({ email: mail, password: pass });
@@ -170,13 +148,24 @@ export class AuthManager {
         }
     }
 
+    async _resolveEmail(usernameOrEmail) {
+        const val = String(usernameOrEmail || '').trim();
+        if (!val) return null;
+        if (val.includes('@')) return val.toLowerCase();
+        try {
+            const { data, error } = await db.rpc('get_email_by_username', { p_username: val });
+            if (error || !data) return null;
+            return data;
+        } catch {
+            return null;
+        }
+    }
+
     // ── Session ───────────────────────────────────────────────────────────────
 
     getActiveSession() {
-        // Synchronous snapshot — Supabase stores session in localStorage internally.
-        // Returns a session-like object compatible with auth-ui.js expectations.
+        // Snapshot síncrono — Supabase guarda la sesión en localStorage.
         try {
-            // Access the raw Supabase session from its internal storage key
             const keys = Object.keys(localStorage);
             const sbKey = keys.find(k => k.startsWith('sb-') && k.endsWith('-auth-token'));
             if (!sbKey) return null;
@@ -216,126 +205,136 @@ export class AuthManager {
         }
     }
 
-    // ── Password recovery (security questions) ────────────────────────────────
-    // Security question data is stored in user_metadata, not queryable by username
-    // from the client without knowing the user's session. Recovery flow:
-    // Step 1 — user enters their email → we fetch their metadata via a sign-in attempt
-    // with a dummy password to get the user record. Instead we store sq data in a
-    // public 'user_profiles' table, but since that table may not exist yet we keep
-    // a graceful fallback using the session-based approach.
+    // ── Password recovery (email link, sin pregunta de seguridad) ─────────────
+    // Reemplaza el flujo viejo (setSecurityQuestion / verifySecurityAnswer /
+    // resetPassword con pregunta) que estaba roto para usuarios sin sesión
+    // cacheada y además era un antipatrón conocido.
 
-    getSecurityQuestion(usernameOrEmail) {
-        // Can only retrieve SQ for the currently logged-in user synchronously.
-        // For recovery (not logged in), we need the async version.
-        const session = this.getActiveSession();
-        if (!session) return null;
-        const meta = this._getRawMetadata();
-        return meta?.securityQuestion || null;
-    }
+    async sendPasswordResetEmail(emailOrUsername) {
+        const mail = await this._resolveEmail(emailOrUsername);
+        if (!mail) {
+            return { ok: false, error: 'No encontramos ninguna cuenta con ese usuario o email.' };
+        }
+        const emailErr = this.validateEmail(mail);
+        if (emailErr) return { ok: false, error: emailErr };
 
-    async getSecurityQuestionForRecovery(email) {
-        // We can't query another user's metadata without their session.
-        // Store SQ in a public profiles table for recovery. If not available, return null.
         try {
-            const { data } = await db
-                .from('user_profiles')
-                .select('security_question')
-                .eq('email', email.toLowerCase().trim())
-                .maybeSingle();
-            return data?.security_question || null;
-        } catch {
-            return null;
+            const redirectTo = `${window.location.origin}/#recovery`;
+            const { error } = await db.auth.resetPasswordForEmail(mail, { redirectTo });
+            if (error) return { ok: false, error: this._mapAuthError(error) };
+            return { ok: true };
+        } catch (e) {
+            console.error('sendPasswordResetEmail error:', e);
+            return { ok: false, error: 'Error al conectar. Verifica tu conexión e intenta de nuevo.' };
         }
     }
 
-    async verifySecurityAnswer(usernameOrEmail, answer) {
-        const ans = String(answer || '').trim().toLowerCase();
-        // For logged-in user (SQ setup flow)
-        const meta = this._getRawMetadata();
-        if (!meta?.answerHash || !meta?.answerSalt) {
-            await this.hashPassword(ans, 'dummy-salt-00000000000000000000000000000000');
-            return false;
-        }
-        const hash = await this.hashPassword(ans, meta.answerSalt);
-        return hash === meta.answerHash;
-    }
-
-    async resetPassword(usernameOrEmail, answer, newPassword) {
+    async applyNewPasswordFromRecovery(newPassword) {
+        // Solo se puede llamar cuando la sesión temporal de recovery ya está
+        // activa (Supabase la establece al procesar el hash con access_token
+        // del link del email). Ver app-init.js.
         const passErr = this.validatePassword(String(newPassword || ''));
         if (passErr) return { ok: false, error: passErr };
-
-        // Supabase password reset requires an email link flow for unauthenticated users.
-        // Since we have security questions, we verify the answer then update via the session.
-        const verified = await this.verifySecurityAnswer(usernameOrEmail, answer);
-        if (!verified) return { ok: false, error: 'No fue posible verificar tu identidad.' };
 
         try {
             const { error } = await db.auth.updateUser({ password: newPassword });
             if (error) return { ok: false, error: this._mapAuthError(error) };
             return { ok: true };
         } catch (e) {
-            console.error('resetPassword error:', e);
+            console.error('applyNewPasswordFromRecovery error:', e);
             return { ok: false, error: 'Error al guardar. Intenta de nuevo.' };
         }
     }
 
-    hasSecurityQuestion(username) {
-        const meta = this._getRawMetadata();
-        return !!(meta?.securityQuestion && meta?.answerHash);
-    }
+    // ── Cambios desde Ajustes (usuario ya logueado) ───────────────────────────
 
-    async setSecurityQuestion(username, currentPassword, question, answer) {
-        const q = String(question || '').trim();
-        const ans = String(answer || '').trim().toLowerCase();
+    async changePassword(currentPassword, newPassword) {
+        const passErr = this.validatePassword(String(newPassword || ''));
+        if (passErr) return { ok: false, error: passErr };
 
-        if (!q) return { ok: false, error: 'Selecciona una pregunta de seguridad.' };
-        if (ans.length < 2) return { ok: false, error: 'La respuesta es demasiado corta.' };
-
-        // Verify current password by re-authenticating
         const session = this.getActiveSession();
         if (!session) return { ok: false, error: 'No hay sesión activa.' };
 
+        // Re-autenticar con la contraseña actual para evitar que un atacante
+        // con acceso momentáneo a una sesión abierta cambie la contraseña sin
+        // conocer la original.
         try {
             const { error: signInErr } = await db.auth.signInWithPassword({
                 email: session.email,
                 password: currentPassword
             });
-            if (signInErr) return { ok: false, error: 'Contraseña incorrecta.' };
+            if (signInErr) return { ok: false, error: 'Contraseña actual incorrecta.' };
         } catch {
-            return { ok: false, error: 'Error al verificar contraseña.' };
+            return { ok: false, error: 'Error al verificar la contraseña actual.' };
         }
 
-        const answerSalt = this.generateSalt();
-        const answerHash = await this.hashPassword(ans, answerSalt);
-
         try {
-            const { error } = await db.auth.updateUser({
-                data: { securityQuestion: q, answerSalt, answerHash }
-            });
+            const { error } = await db.auth.updateUser({ password: newPassword });
             if (error) return { ok: false, error: this._mapAuthError(error) };
             return { ok: true };
         } catch (e) {
-            console.error('setSecurityQuestion error:', e);
+            console.error('changePassword error:', e);
+            return { ok: false, error: 'Error al guardar. Intenta de nuevo.' };
+        }
+    }
+
+    async changeEmail(newEmail) {
+        const mail = String(newEmail || '').trim().toLowerCase();
+        const emailErr = this.validateEmail(mail);
+        if (emailErr) return { ok: false, error: emailErr };
+
+        try {
+            // Supabase envía un mail de confirmación al nuevo email. El cambio
+            // se aplica solo cuando el usuario lo confirma.
+            const { error } = await db.auth.updateUser({ email: mail });
+            if (error) return { ok: false, error: this._mapAuthError(error) };
+            return { ok: true };
+        } catch (e) {
+            console.error('changeEmail error:', e);
+            return { ok: false, error: 'Error al guardar. Intenta de nuevo.' };
+        }
+    }
+
+    async updateDisplayName({ displayName, username }) {
+        const name = String(displayName || '').trim();
+        const user = String(username || '').trim();
+
+        if (name && name.length < 1) return { ok: false, error: 'El nombre no puede estar vacío.' };
+        if (user) {
+            const userErr = this.validateUsername(user);
+            if (userErr) return { ok: false, error: userErr };
+        }
+
+        const patch = {};
+        if (name) patch.displayName = name;
+        if (user) patch.username = user;
+
+        try {
+            const { error } = await db.auth.updateUser({ data: patch });
+            if (error) return { ok: false, error: this._mapAuthError(error) };
+
+            // Reflejar el cambio de username también en user_profiles para que
+            // el RPC get_email_by_username siga funcionando post-cambio.
+            if (user) {
+                const session = this.getActiveSession();
+                if (session?.userId) {
+                    try {
+                        await db.from('user_profiles')
+                            .update({ username: user })
+                            .eq('id', session.userId);
+                    } catch (profileErr) {
+                        console.warn('updateDisplayName: username sync failed:', profileErr);
+                    }
+                }
+            }
+            return { ok: true };
+        } catch (e) {
+            console.error('updateDisplayName error:', e);
             return { ok: false, error: 'Error al guardar. Intenta de nuevo.' };
         }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    _getRawMetadata() {
-        try {
-            const keys = Object.keys(localStorage);
-            const sbKey = keys.find(k => k.startsWith('sb-') && k.endsWith('-auth-token'));
-            if (!sbKey) return null;
-            const raw = localStorage.getItem(sbKey);
-            if (!raw) return null;
-            const parsed = JSON.parse(raw);
-            const supaSession = parsed?.session ?? parsed;
-            return supaSession?.user?.user_metadata || null;
-        } catch {
-            return null;
-        }
-    }
 
     _sessionFromSupaUser(user) {
         const meta = user.user_metadata || {};

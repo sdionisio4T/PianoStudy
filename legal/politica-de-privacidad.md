@@ -2,7 +2,7 @@
 
 **Última actualización:** [FECHA DE PUBLICACIÓN]
 
-> ⚠️ **Borrador de trabajo, no publicado todavía.** Igual que los Términos de Servicio, este documento tiene placeholders entre corchetes por completar y conviene que lo revise un abogado antes de publicarlo — especialmente las secciones de datos de menores, consentimiento para IA, y las obligaciones que aplican si tenés usuarios en la Unión Europea (GDPR) o California (CCPA), que este borrador no cubre en detalle. Ver `RESUMEN_SESION_REMOTA_2026-08-09.md` para el resto de las salvedades.
+> ⚠️ **Borrador de trabajo, no publicado todavía.** Igual que los Términos de Servicio, este documento tiene placeholders entre corchetes por completar y conviene que lo revise un abogado antes de publicarlo — especialmente las secciones de datos de menores, consentimiento para IA, y las obligaciones que aplican si tenés usuarios en la Unión Europea (GDPR) o California (CCPA), que este borrador no cubre en detalle. Ver `../docs/sessions/2026-08-09.md` para el resto de las salvedades.
 
 ---
 
@@ -15,7 +15,7 @@ PianoStudy es una aplicación de estudio para pianistas operada por [NOMBRE LEGA
 **Datos de tu cuenta:**
 - Nombre completo, nombre de usuario, email.
 - Contraseña (no la vemos ni la guardamos en texto plano — la maneja el sistema de autenticación con hash seguro).
-- Pregunta y respuesta de seguridad para recuperar tu cuenta (la respuesta se guarda con un hash reforzado, no en texto plano).
+- La recuperación de contraseña se hace por link enviado a tu email; no usamos preguntas de seguridad.
 
 **Tu contenido musical:**
 - Grabaciones de audio de tus sesiones de práctica.
@@ -77,18 +77,25 @@ Podemos compartir datos si la ley nos obliga (por ejemplo, una orden judicial), 
 
 ## 7. Cuánto tiempo guardamos tus datos
 
-Guardamos tus datos mientras tu cuenta esté activa. Si eliminás tu cuenta, borramos tu perfil y tu contenido asociado (grabaciones, licks, historial), salvo lo que estemos obligados a conservar por ley o lo que quede en copias de seguridad hasta que estas roten de forma natural (nuestras copias de la base de datos y del almacenamiento se retienen por un período limitado antes de reemplazarse por backups más nuevos).
+Guardamos tus datos mientras tu cuenta esté activa. Cuando pidas eliminar tu cuenta desde Ajustes, la marcamos para eliminación y borramos definitivamente tu perfil y tu contenido asociado (grabaciones, licks, historial) **30 días después**, salvo lo que estemos obligados a conservar por ley o lo que quede en copias de seguridad hasta que estas roten de forma natural (nuestras copias de la base de datos y del almacenamiento se retienen por un período limitado antes de reemplazarse por backups más nuevos). Durante ese plazo de 30 días podés cancelar la eliminación iniciando sesión.
 
 ## 8. Tus derechos sobre tus datos
 
-Podés:
+Podés ejercer los derechos que te reconoce la normativa aplicable (en Europa, el RGPD; en Argentina, la Ley 25.326; en otros países, la equivalente local):
 
-- Pedirnos una copia de los datos que tenemos sobre vos.
-- Pedirnos que corrijamos datos incorrectos de tu perfil.
-- Pedirnos que eliminemos tu cuenta y tu contenido.
-- Retirar el consentimiento para uso de tus datos en entrenamiento de IA (sección 4) sin afectar el resto del servicio.
+- **Acceso y portabilidad** (RGPD art. 15 y 20): pedirnos una copia de los datos que tenemos sobre vos, en un formato estructurado que puedas llevarte.
+- **Rectificación** (art. 16): corregir datos incorrectos de tu perfil.
+- **Supresión / derecho al olvido** (art. 17): eliminar tu cuenta y tu contenido.
+- **Retirar el consentimiento** para uso de tus datos en entrenamiento de IA (sección 4) sin afectar el resto del servicio.
 
-**Cómo ejercerlos hoy:** escribinos a [EMAIL DE CONTACTO]. Todavía no tenemos un botón de autoservicio dentro de la app para exportar o borrar tus datos automáticamente — mientras tanto, lo procesamos manualmente al recibir tu pedido, en un plazo razonable (buscamos no superar [30 días]).
+**Cómo ejercerlos:** dentro de la app, en **Ajustes**:
+
+- *"Descargar mis datos"* genera al instante un archivo `.zip` con tu perfil, licks, grabaciones (audio incluido), artistas propios, canciones favoritas y sesiones de práctica — sin pasar por nuestro equipo.
+- *"Eliminar mi cuenta"* la marca para eliminación en 30 días. Podés cancelar la eliminación iniciando sesión antes de esa fecha.
+- El toggle *"Uso de mis grabaciones para mejorar la IA"* aplica de inmediato al activarlo o desactivarlo.
+- El cambio de email, contraseña y nombre público también se hace desde Ajustes.
+
+Si algo no se puede resolver por autoservicio (por ejemplo, exigir una eliminación anticipada de los backups fuera del ciclo normal, o pedirnos un desglose adicional sobre categorías específicas de datos), escribinos a [EMAIL DE CONTACTO]. Respondemos dentro de un plazo razonable (buscamos no superar [30 días]).
 
 ## 9. Menores de edad
 

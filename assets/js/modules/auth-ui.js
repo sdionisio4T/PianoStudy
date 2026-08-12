@@ -1,5 +1,7 @@
 import { AuthManager } from './AuthManager.js';
 import { consentManager } from './ConsentManager.js';
+import { toast } from './Toast.js';
+import { db } from './supabase-client.js';
 
 const auth = new AuthManager();
 
@@ -24,24 +26,12 @@ function initials(fullName) {
         .join('');
 }
 
-// ── Toast ─────────────────────────────────────────────────────────────────────
+// ── Toast (delegado al sistema unificado en modules/Toast.js) ─────────────────
 
 function showToast(message, type = 'success') {
-    const existing = document.getElementById('auth-toast');
-    if (existing) existing.remove();
-
-    const toast = document.createElement('div');
-    toast.id = 'auth-toast';
-    toast.className = `auth-toast auth-toast--${type}`;
-    toast.textContent = message;
-    document.body.appendChild(toast);
-
-    requestAnimationFrame(() => toast.classList.add('auth-toast--visible'));
-
-    setTimeout(() => {
-        toast.classList.remove('auth-toast--visible');
-        toast.addEventListener('transitionend', () => toast.remove(), { once: true });
-    }, 3500);
+    const map = { success: 'exito', error: 'error', warning: 'aviso', info: 'info' };
+    const kind = map[type] || 'info';
+    toast[kind](message);
 }
 
 // ── Modal helpers ─────────────────────────────────────────────────────────────
@@ -56,7 +46,6 @@ function openModal(tab = 'login') {
     overlay.classList.add('auth-overlay--visible');
     modal.classList.add('auth-modal--visible');
     switchTab(tab);
-    // Focus first input
     setTimeout(() => {
         const first = modal.querySelector(`#auth-${tab}-form input`);
         if (first) first.focus();
@@ -93,7 +82,7 @@ function showError(id, message) {
     if (!el) return;
     el.textContent = message;
     el.classList.remove('auth-error--shake');
-    void el.offsetWidth; // reflow to restart animation
+    void el.offsetWidth;
     el.classList.add('auth-error--shake');
 }
 
@@ -146,12 +135,6 @@ function renderLoggedIn(session) {
     if (!section) return;
     const color = avatarColor(session.fullName);
     const ini = initials(session.fullName);
-    const hasQ = auth.hasSecurityQuestion(session.username);
-    const warningBtn = hasQ ? '' : `
-        <button class="auth-sq-warning-btn" id="auth-sq-warning-btn"
-                title="Configura tu pregunta de seguridad" aria-label="Configura tu pregunta de seguridad">
-            <i class="fas fa-exclamation-triangle"></i>
-        </button>`;
     section.innerHTML = `
         <div class="auth-profile">
             <div class="auth-avatar" style="background:${color}" title="${escSafe(session.fullName)}">${escSafe(ini)}</div>
@@ -159,7 +142,6 @@ function renderLoggedIn(session) {
                 <span class="auth-profile-name">${escSafe(session.fullName)}</span>
                 <span class="auth-profile-username">@${escSafe(session.username)}</span>
             </div>
-            ${warningBtn}
             <button class="auth-logout-btn" id="auth-logout-btn" title="Cerrar sesión">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
@@ -170,11 +152,7 @@ function renderLoggedIn(session) {
         </div>
     `;
     document.getElementById('auth-logout-btn')?.addEventListener('click', handleLogout);
-    document.getElementById('auth-sq-warning-btn')?.addEventListener('click', openSQSetupModal);
 
-    // Pregunta el consentimiento de datos musicales para IA si todavía no se
-    // respondió. Es un no-op si ya se preguntó en esta carga de página o si
-    // el usuario ya había respondido antes (ver ConsentManager.js).
     consentManager.checkAndPrompt();
 }
 
@@ -196,12 +174,10 @@ async function handleRegister(e) {
     const username = document.getElementById('reg-username')?.value || '';
     const email = document.getElementById('reg-email')?.value || '';
     const password = document.getElementById('reg-password')?.value || '';
-    const securityQuestion = document.getElementById('reg-security-question')?.value || '';
-    const securityAnswer = document.getElementById('reg-security-answer')?.value || '';
 
     setLoading('auth-register-form', true);
 
-    const result = await auth.register({ fullName, username, email, password, securityQuestion, securityAnswer });
+    const result = await auth.register({ fullName, username, email, password });
 
     setLoading('auth-register-form', false);
 
@@ -268,18 +244,7 @@ function setupTogglePassword(toggleId, inputId) {
 
 // ── Modal HTML ────────────────────────────────────────────────────────────────
 
-const SECURITY_QUESTIONS = [
-    '¿Cuál es el nombre de tu primera mascota?',
-    '¿En qué ciudad naciste?',
-    '¿Cuál fue tu primer instrumento musical?',
-    '¿Cuál es el nombre de tu mejor amigo de infancia?'
-];
-
 function buildModalHTML() {
-    const questionOptions = SECURITY_QUESTIONS
-        .map(q => `<option value="${escSafe(q)}">${escSafe(q)}</option>`)
-        .join('');
-
     return `
 <div id="auth-modal-overlay" class="auth-overlay" role="dialog" aria-modal="true" aria-label="Autenticación">
     <div id="auth-modal" class="auth-modal">
@@ -357,18 +322,6 @@ function buildModalHTML() {
                         <span class="auth-strength-label" id="auth-strength-label"></span>
                     </div>
                 </div>
-                <div class="auth-field">
-                    <label class="auth-label" for="reg-security-question">Pregunta de seguridad</label>
-                    <select class="auth-input auth-select" id="reg-security-question" name="securityQuestion" required>
-                        <option value="">Selecciona una pregunta...</option>
-                        ${questionOptions}
-                    </select>
-                </div>
-                <div class="auth-field">
-                    <label class="auth-label" for="reg-security-answer">Respuesta</label>
-                    <input class="auth-input" id="reg-security-answer" name="securityAnswer"
-                           type="text" autocomplete="off" placeholder="Tu respuesta" required>
-                </div>
                 <p class="auth-error" id="auth-register-error" role="alert"></p>
                 <button type="submit" class="auth-submit-btn">
                     <span class="auth-spinner" style="display:none"></span>
@@ -381,64 +334,23 @@ function buildModalHTML() {
             </p>
         </div>
 
-        <!-- RECOVERY (not a tab — shown/hidden as a panel overlay) -->
+        <!-- RECOVERY — un solo paso: pedir email, mandar link -->
         <div class="auth-form-panel" data-panel="recovery" id="auth-recovery-panel">
-            <div id="recovery-step-1">
-                <p class="auth-recovery-title">Recuperar contraseña</p>
-                <div class="auth-field">
-                    <label class="auth-label" for="recovery-username">Email</label>
-                    <input class="auth-input" id="recovery-username" type="email"
-                           autocomplete="email" placeholder="tu@email.com">
-                </div>
-                <p class="auth-error" id="auth-recovery-error-1" role="alert"></p>
-                <button type="button" class="auth-submit-btn" id="recovery-continue-btn">
-                    <span class="auth-spinner" style="display:none"></span>
-                    <span class="auth-btn-label">Continuar</span>
-                </button>
+            <p class="auth-recovery-title">Recuperar contraseña</p>
+            <p class="auth-recovery-help">
+                Ingresa tu email o usuario y te enviaremos un link para elegir
+                una nueva contraseña.
+            </p>
+            <div class="auth-field">
+                <label class="auth-label" for="recovery-username">Email o usuario</label>
+                <input class="auth-input" id="recovery-username" type="text"
+                       autocomplete="username" placeholder="tu@email.com o tu_usuario">
             </div>
-
-            <div id="recovery-step-2" style="display:none">
-                <p class="auth-recovery-title">Pregunta de seguridad</p>
-                <p class="auth-recovery-question" id="recovery-question-text"></p>
-                <div class="auth-field">
-                    <label class="auth-label" for="recovery-answer">Tu respuesta</label>
-                    <input class="auth-input" id="recovery-answer" type="text"
-                           autocomplete="off" placeholder="Respuesta">
-                </div>
-                <p class="auth-error" id="auth-recovery-error-2" role="alert"></p>
-                <button type="button" class="auth-submit-btn" id="recovery-verify-btn">
-                    <span class="auth-spinner" style="display:none"></span>
-                    <span class="auth-btn-label">Verificar</span>
-                </button>
-            </div>
-
-            <div id="recovery-step-3" style="display:none">
-                <p class="auth-recovery-title">Nueva contraseña</p>
-                <form novalidate autocomplete="off" onsubmit="return false;">
-                <input type="text" name="username" autocomplete="username" style="display:none">
-                <div class="auth-field">
-                    <label class="auth-label" for="recovery-new-pw">Nueva contraseña</label>
-                    <div class="auth-input-wrap">
-                        <input class="auth-input" id="recovery-new-pw" type="password"
-                               autocomplete="new-password" placeholder="••••••">
-                        <button type="button" class="auth-toggle-pw" id="recovery-pw-toggle" tabindex="-1" aria-label="Mostrar contraseña">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                        </button>
-                    </div>
-                </div>
-                <div class="auth-field">
-                    <label class="auth-label" for="recovery-confirm-pw">Confirmar contraseña</label>
-                    <input class="auth-input" id="recovery-confirm-pw" type="password"
-                           autocomplete="new-password" placeholder="••••••">
-                </div>
-                </form>
-                <p class="auth-error" id="auth-recovery-error-3" role="alert"></p>
-                <button type="button" class="auth-submit-btn" id="recovery-save-btn">
-                    <span class="auth-spinner" style="display:none"></span>
-                    <span class="auth-btn-label">Guardar contraseña</span>
-                </button>
-            </div>
-
+            <p class="auth-error" id="auth-recovery-error" role="alert"></p>
+            <button type="button" class="auth-submit-btn" id="recovery-send-btn">
+                <span class="auth-spinner" style="display:none"></span>
+                <span class="auth-btn-label">Enviarme el link</span>
+            </button>
             <p class="auth-switch-text" style="margin-top:1rem">
                 <button class="auth-switch-link" id="recovery-back-link">← Volver al inicio de sesión</button>
             </p>
@@ -447,129 +359,51 @@ function buildModalHTML() {
 </div>`;
 }
 
-// ── SQ Setup modal HTML ───────────────────────────────────────────────────────
+// ── Password recovery modal (post-link, cuando el usuario vuelve del email) ──
 
-function buildSQSetupModalHTML() {
-    const questionOptions = SECURITY_QUESTIONS
-        .map(q => `<option value="${escSafe(q)}">${escSafe(q)}</option>`)
-        .join('');
-
+function buildRecoveryPasswordModalHTML() {
     return `
-<div id="sq-setup-overlay" class="auth-overlay" role="dialog" aria-modal="true" aria-label="Configurar pregunta de seguridad">
-    <div id="sq-setup-modal" class="auth-modal sq-setup-modal">
-        <button class="auth-modal-close" id="sq-setup-close" aria-label="Cerrar">&times;</button>
+<div id="pw-recovery-overlay" class="auth-overlay" role="dialog" aria-modal="true" aria-label="Elegir nueva contraseña">
+    <div id="pw-recovery-modal" class="auth-modal">
         <p class="auth-recovery-title" style="margin-bottom:0.25rem">
-            <i class="fas fa-shield-alt" style="color:var(--accent-green);margin-right:0.4rem"></i>
-            Configurar pregunta de seguridad
+            <i class="fas fa-key" style="color:var(--accent-green);margin-right:0.4rem"></i>
+            Elegir nueva contraseña
         </p>
-        <p style="color:var(--text-secondary);font-size:0.82rem;font-family:'Courier New',monospace;margin-bottom:1.25rem">
-            Esto te permitirá recuperar tu contraseña si la olvidas.
+        <p class="auth-recovery-help" style="margin-bottom:1rem">
+            Verificamos tu identidad con el link del correo. Escribí tu nueva
+            contraseña dos veces para confirmar.
         </p>
-        <form id="sq-setup-form" novalidate autocomplete="off">
+        <form id="pw-recovery-form" novalidate autocomplete="off">
             <input type="text" name="username" autocomplete="username" style="display:none">
             <div class="auth-field">
-                <label class="auth-label" for="sq-current-pw">Contraseña actual</label>
+                <label class="auth-label" for="pw-recovery-new">Nueva contraseña</label>
                 <div class="auth-input-wrap">
-                    <input class="auth-input" id="sq-current-pw" type="password"
-                           autocomplete="current-password" placeholder="••••••" required>
-                    <button type="button" class="auth-toggle-pw" id="sq-pw-toggle" tabindex="-1" aria-label="Mostrar contraseña">
+                    <input class="auth-input" id="pw-recovery-new" type="password"
+                           autocomplete="new-password" placeholder="••••••" required>
+                    <button type="button" class="auth-toggle-pw" id="pw-recovery-toggle" tabindex="-1" aria-label="Mostrar contraseña">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                     </button>
                 </div>
             </div>
             <div class="auth-field">
-                <label class="auth-label" for="sq-question">Pregunta de seguridad</label>
-                <select class="auth-input auth-select" id="sq-question" required>
-                    <option value="">Selecciona una pregunta...</option>
-                    ${questionOptions}
-                </select>
+                <label class="auth-label" for="pw-recovery-confirm">Confirmar contraseña</label>
+                <input class="auth-input" id="pw-recovery-confirm" type="password"
+                       autocomplete="new-password" placeholder="••••••" required>
             </div>
-            <div class="auth-field">
-                <label class="auth-label" for="sq-answer">Respuesta</label>
-                <input class="auth-input" id="sq-answer" type="text"
-                       autocomplete="off" placeholder="Tu respuesta" required>
-            </div>
-            <p class="auth-error" id="sq-setup-error" role="alert"></p>
+            <p class="auth-error" id="pw-recovery-error" role="alert"></p>
             <button type="submit" class="auth-submit-btn">
                 <span class="auth-spinner" style="display:none"></span>
-                <span class="auth-btn-label">Guardar</span>
+                <span class="auth-btn-label">Guardar contraseña</span>
             </button>
         </form>
     </div>
 </div>`;
 }
 
-// ── SQ Setup handlers ─────────────────────────────────────────────────────────
-
-function openSQSetupModal() {
-    const overlay = document.getElementById('sq-setup-overlay');
-    const modal = document.getElementById('sq-setup-modal');
-    if (!overlay || !modal) return;
-    document.getElementById('sq-current-pw').value = '';
-    document.getElementById('sq-question').value = '';
-    document.getElementById('sq-answer').value = '';
-    document.getElementById('sq-setup-error').textContent = '';
-    overlay.classList.add('auth-overlay--visible');
-    modal.classList.add('auth-modal--visible');
-    setTimeout(() => document.getElementById('sq-current-pw')?.focus(), 80);
-}
-
-function closeSQSetupModal() {
-    document.getElementById('sq-setup-overlay')?.classList.remove('auth-overlay--visible');
-    document.getElementById('sq-setup-modal')?.classList.remove('auth-modal--visible');
-}
-
-async function handleSQSetupSave(e) {
-    e.preventDefault();
-    const errEl = document.getElementById('sq-setup-error');
-    errEl.textContent = '';
-    errEl.classList.remove('auth-error--shake');
-
-    const session = auth.getActiveSession();
-    if (!session) { closeSQSetupModal(); return; }
-
-    const currentPw = document.getElementById('sq-current-pw')?.value || '';
-    const question = document.getElementById('sq-question')?.value || '';
-    const answer = document.getElementById('sq-answer')?.value || '';
-
-    const btn = document.querySelector('#sq-setup-form .auth-submit-btn');
-    const spinner = btn?.querySelector('.auth-spinner');
-    const label = btn?.querySelector('.auth-btn-label');
-    if (btn) btn.disabled = true;
-    if (spinner) spinner.style.display = 'inline-block';
-    if (label) label.style.opacity = '0.5';
-
-    const result = await auth.setSecurityQuestion(session.username, currentPw, question, answer);
-
-    if (btn) btn.disabled = false;
-    if (spinner) spinner.style.display = 'none';
-    if (label) label.style.opacity = '1';
-
-    if (!result.ok) {
-        errEl.textContent = result.error;
-        void errEl.offsetWidth;
-        errEl.classList.add('auth-error--shake');
-        return;
-    }
-
-    closeSQSetupModal();
-    renderLoggedIn(session);
-    showToast('¡Pregunta de seguridad configurada! 🔒', 'success');
-}
-
 // ── Recovery helpers ──────────────────────────────────────────────────────────
 
-let _recoveryUsername = '';
-
 function showRecoveryPanel() {
-    _recoveryUsername = '';
-    document.getElementById('recovery-step-1').style.display = '';
-    document.getElementById('recovery-step-2').style.display = 'none';
-    document.getElementById('recovery-step-3').style.display = 'none';
     document.getElementById('recovery-username').value = '';
-    document.getElementById('recovery-answer').value = '';
-    document.getElementById('recovery-new-pw').value = '';
-    document.getElementById('recovery-confirm-pw').value = '';
     clearErrors();
 
     document.getElementById('auth-tabs-bar').style.display = 'none';
@@ -593,70 +427,103 @@ function setRecoveryLoading(btnId, loading) {
     if (label) label.style.opacity = loading ? '0.5' : '1';
 }
 
-async function handleRecoveryContinue() {
+async function handleRecoverySend() {
     clearErrors();
-    const email = String(document.getElementById('recovery-username')?.value || '').trim();
-    if (!email) {
-        showError('auth-recovery-error-1', 'Ingresa tu email.');
+    const val = String(document.getElementById('recovery-username')?.value || '').trim();
+    if (!val) {
+        showError('auth-recovery-error', 'Ingresa tu email o usuario.');
         return;
     }
-    setRecoveryLoading('recovery-continue-btn', true);
-    const question = await auth.getSecurityQuestionForRecovery(email);
-    setRecoveryLoading('recovery-continue-btn', false);
-
-    if (!question) {
-        showError('auth-recovery-error-1',
-            'Esta cuenta no tiene pregunta de seguridad configurada. ' +
-            'Inicia sesión con tu contraseña actual y podrás configurarla desde tu perfil.');
-        return;
-    }
-    _recoveryUsername = email;
-    document.getElementById('recovery-question-text').textContent = question;
-    document.getElementById('recovery-step-1').style.display = 'none';
-    document.getElementById('recovery-step-2').style.display = '';
-    setTimeout(() => document.getElementById('recovery-answer')?.focus(), 60);
-}
-
-async function handleRecoveryVerify() {
-    clearErrors();
-    const answer = String(document.getElementById('recovery-answer')?.value || '').trim();
-    if (!answer) {
-        showError('auth-recovery-error-2', 'Ingresa tu respuesta.');
-        return;
-    }
-    setRecoveryLoading('recovery-verify-btn', true);
-    const ok = await auth.verifySecurityAnswer(_recoveryUsername, answer);
-    setRecoveryLoading('recovery-verify-btn', false);
-
-    if (!ok) {
-        showError('auth-recovery-error-2', 'No fue posible verificar tu identidad.');
-        return;
-    }
-    document.getElementById('recovery-step-2').style.display = 'none';
-    document.getElementById('recovery-step-3').style.display = '';
-    setTimeout(() => document.getElementById('recovery-new-pw')?.focus(), 60);
-}
-
-async function handleRecoverySave() {
-    clearErrors();
-    const newPw = String(document.getElementById('recovery-new-pw')?.value || '');
-    const confirmPw = String(document.getElementById('recovery-confirm-pw')?.value || '');
-
-    if (newPw !== confirmPw) {
-        showError('auth-recovery-error-3', 'Las contraseñas no coinciden.');
-        return;
-    }
-    const answer = String(document.getElementById('recovery-answer')?.value || '').trim();
-    setRecoveryLoading('recovery-save-btn', true);
-    const result = await auth.resetPassword(_recoveryUsername, answer, newPw);
-    setRecoveryLoading('recovery-save-btn', false);
+    setRecoveryLoading('recovery-send-btn', true);
+    const result = await auth.sendPasswordResetEmail(val);
+    setRecoveryLoading('recovery-send-btn', false);
 
     if (!result.ok) {
-        showError('auth-recovery-error-3', result.error);
+        showError('auth-recovery-error', result.error);
         return;
     }
     hideRecoveryPanel();
-    showToast('¡Contraseña actualizada! Ya puedes ingresar 🎹', 'success');
+    closeModal();
+    toast.exito('Te enviamos un link para elegir una nueva contraseña. Revisa tu correo (y la carpeta de spam).');
+}
+
+// ── Post-link password modal ──────────────────────────────────────────────────
+
+let _recoveryModalReady = false;
+let _pendingRecoveryOpen = false;
+
+function ensureRecoveryModal() {
+    if (_recoveryModalReady) return;
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = buildRecoveryPasswordModalHTML();
+    document.body.appendChild(wrapper.firstElementChild);
+    _recoveryModalReady = true;
+
+    document.getElementById('pw-recovery-form')?.addEventListener('submit', handleRecoveryPasswordSave);
+    setupTogglePassword('pw-recovery-toggle', 'pw-recovery-new');
+}
+
+function openRecoveryPasswordModal() {
+    ensureRecoveryModal();
+    const overlay = document.getElementById('pw-recovery-overlay');
+    const modal = document.getElementById('pw-recovery-modal');
+    if (!overlay || !modal) return;
+    document.getElementById('pw-recovery-new').value = '';
+    document.getElementById('pw-recovery-confirm').value = '';
+    document.getElementById('pw-recovery-error').textContent = '';
+    overlay.classList.add('auth-overlay--visible');
+    modal.classList.add('auth-modal--visible');
+    setTimeout(() => document.getElementById('pw-recovery-new')?.focus(), 80);
+}
+
+function closeRecoveryPasswordModal() {
+    document.getElementById('pw-recovery-overlay')?.classList.remove('auth-overlay--visible');
+    document.getElementById('pw-recovery-modal')?.classList.remove('auth-modal--visible');
+}
+
+async function handleRecoveryPasswordSave(e) {
+    e.preventDefault();
+    const errEl = document.getElementById('pw-recovery-error');
+    errEl.textContent = '';
+    errEl.classList.remove('auth-error--shake');
+
+    const newPw = String(document.getElementById('pw-recovery-new')?.value || '');
+    const confirmPw = String(document.getElementById('pw-recovery-confirm')?.value || '');
+
+    if (newPw !== confirmPw) {
+        errEl.textContent = 'Las contraseñas no coinciden.';
+        void errEl.offsetWidth;
+        errEl.classList.add('auth-error--shake');
+        return;
+    }
+
+    const btn = document.querySelector('#pw-recovery-form .auth-submit-btn');
+    const spinner = btn?.querySelector('.auth-spinner');
+    const label = btn?.querySelector('.auth-btn-label');
+    if (btn) btn.disabled = true;
+    if (spinner) spinner.style.display = 'inline-block';
+    if (label) label.style.opacity = '0.5';
+
+    const result = await auth.applyNewPasswordFromRecovery(newPw);
+
+    if (btn) btn.disabled = false;
+    if (spinner) spinner.style.display = 'none';
+    if (label) label.style.opacity = '1';
+
+    if (!result.ok) {
+        errEl.textContent = result.error;
+        void errEl.offsetWidth;
+        errEl.classList.add('auth-error--shake');
+        return;
+    }
+
+    closeRecoveryPasswordModal();
+    // Limpiar el hash del URL para que un F5 no vuelva a disparar el modal.
+    if (window.location.hash) {
+        try { history.replaceState(null, '', window.location.pathname + window.location.search); }
+        catch { /* no-op */ }
+    }
+    toast.exito('¡Contraseña actualizada! Ya podés usar la app.');
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -672,42 +539,33 @@ function init() {
         document.body.appendChild(modalContainer.firstElementChild);
     }
 
-    // Inject SQ setup modal into DOM
-    const sqContainer = document.createElement('div');
-    sqContainer.innerHTML = buildSQSetupModalHTML();
-    document.body.appendChild(sqContainer.firstElementChild);
+    // Preparar el modal de nueva contraseña por si llegamos con hash de recovery.
+    ensureRecoveryModal();
 
     // Tab switching
     document.querySelectorAll('.auth-tab-btn').forEach(btn => {
         btn.addEventListener('click', () => switchTab(btn.dataset.tab));
     });
 
-    // Switch links inside panels (data-tab attribute)
     document.querySelectorAll('.auth-switch-link[data-tab]').forEach(link => {
         link.addEventListener('click', () => switchTab(link.dataset.tab));
     });
 
-    // Close button
     document.getElementById('auth-modal-close')?.addEventListener('click', closeModal);
 
-    // Overlay click outside
     document.getElementById('auth-modal-overlay')?.addEventListener('click', (e) => {
         if (e.target === e.currentTarget) closeModal();
     });
 
-    // Escape key
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
             closeModal();
-            closeSQSetupModal();
         }
     });
 
-    // Forms
     document.getElementById('auth-login-form')?.addEventListener('submit', handleLogin);
     document.getElementById('auth-register-form')?.addEventListener('submit', handleRegister);
 
-    // Enter on login password field
     document.getElementById('login-password')?.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
             e.preventDefault();
@@ -715,47 +573,22 @@ function init() {
         }
     });
 
-    // Password toggles
     setupTogglePassword('login-pw-toggle', 'login-password');
     setupTogglePassword('reg-pw-toggle', 'reg-password');
-    setupTogglePassword('recovery-pw-toggle', 'recovery-new-pw');
-    setupTogglePassword('sq-pw-toggle', 'sq-current-pw');
 
-    // SQ setup modal events
-    document.getElementById('sq-setup-close')?.addEventListener('click', closeSQSetupModal);
-    document.getElementById('sq-setup-overlay')?.addEventListener('click', (e) => {
-        if (e.target === e.currentTarget) closeSQSetupModal();
-    });
-    document.getElementById('sq-setup-form')?.addEventListener('submit', handleSQSetupSave);
-
-    // Strength bar
     document.getElementById('reg-password')?.addEventListener('input', (e) => {
         updateStrengthBar(e.target.value);
     });
 
-    // Forgot password link
     document.getElementById('auth-forgot-link')?.addEventListener('click', showRecoveryPanel);
-
-    // Recovery back link
     document.getElementById('recovery-back-link')?.addEventListener('click', hideRecoveryPanel);
+    document.getElementById('recovery-send-btn')?.addEventListener('click', handleRecoverySend);
 
-    // Recovery step buttons
-    document.getElementById('recovery-continue-btn')?.addEventListener('click', handleRecoveryContinue);
-    document.getElementById('recovery-verify-btn')?.addEventListener('click', handleRecoveryVerify);
-    document.getElementById('recovery-save-btn')?.addEventListener('click', handleRecoverySave);
-
-    // Enter key on recovery inputs
     document.getElementById('recovery-username')?.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') handleRecoveryContinue();
-    });
-    document.getElementById('recovery-answer')?.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') handleRecoveryVerify();
-    });
-    document.getElementById('recovery-confirm-pw')?.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') handleRecoverySave();
+        if (e.key === 'Enter') handleRecoverySend();
     });
 
-    // Listen for Supabase auth state changes
+    // Auth state changes
     auth.onAuthStateChange((event, session) => {
         if (event === 'SIGNED_IN' && session) {
             renderLoggedIn(session);
@@ -763,8 +596,27 @@ function init() {
             renderLoggedOut();
         } else if (event === 'USER_UPDATED' && session) {
             renderLoggedIn(session);
+        } else if (event === 'PASSWORD_RECOVERY') {
+            // El usuario vino desde el link del email; supabase-js ya consumió
+            // el hash y estableció una sesión temporal. Abrimos el modal para
+            // que elija la contraseña nueva.
+            openRecoveryPasswordModal();
         }
     });
+
+    // Si por race condition el evento PASSWORD_RECOVERY se disparó antes de
+    // que quedara el listener conectado, y el hash sigue apuntando a un
+    // recovery, abrimos el modal después de dejar que supabase-js procese la
+    // sesión (getSession fuerza esa resolución).
+    if (/type=recovery/.test(window.location.hash || '')) {
+        _pendingRecoveryOpen = true;
+        db.auth.getSession().then(() => {
+            if (_pendingRecoveryOpen) {
+                _pendingRecoveryOpen = false;
+                openRecoveryPasswordModal();
+            }
+        });
+    }
 
     // Restore session on page load
     auth.getActiveSessionAsync().then(session => {
