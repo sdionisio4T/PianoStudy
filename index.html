@@ -9,14 +9,22 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta http-equiv="Content-Security-Policy" 
           content="default-src 'self'; 
-                   script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdnjs.cloudflare.com https://www.youtube.com https://www.youtube-nocookie.com https://unpkg.com https://cdn.jsdelivr.net; 
+                   script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://cdnjs.cloudflare.com https://www.youtube.com https://www.youtube-nocookie.com https://unpkg.com https://cdn.jsdelivr.net;
                    style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; 
                    font-src 'self' https://cdnjs.cloudflare.com https://fonts.gstatic.com;
                    img-src 'self' data: https://i.ytimg.com https://upload.wikimedia.org https://wsrv.nl; 
-                   connect-src 'self' https://cdn.jsdelivr.net https://unpkg.com https://mtejpgwjdhzuqrqfdlud.supabase.co wss://mtejpgwjdhzuqrqfdlud.supabase.co https://generativelanguage.googleapis.com; 
+                   connect-src 'self' https://cdn.jsdelivr.net https://unpkg.com https://wdbeucosldkiphnygcce.supabase.co wss://wdbeucosldkiphnygcce.supabase.co https://generativelanguage.googleapis.com; 
                    frame-src https://www.youtube.com https://www.youtube-nocookie.com; 
-                   media-src 'self' blob: https://mtejpgwjdhzuqrqfdlud.supabase.co;">
+                   media-src 'self' blob: https://wdbeucosldkiphnygcce.supabase.co;">
     <title>PianoStudy - Estudio para Pianistas</title>
+
+    <!-- Favicons / app icons -->
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/img/logo/PianoStudy_icon_16x16.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/img/logo/PianoStudy_icon_32x32.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="assets/img/logo/PianoStudy_icon_192x192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="assets/img/logo/PianoStudy_icon_512x512.png">
+    <link rel="apple-touch-icon" href="assets/img/logo/PianoStudy_icon_192x192.png">
+
     <link rel="stylesheet" href="styles.css">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 
@@ -28,14 +36,17 @@
     <script defer src="https://cdn.jsdelivr.net/npm/essentia.js/dist/essentia-wasm.umd.js"></script>
     <script defer src="https://unpkg.com/essentia.js/dist/essentia.js-core.umd.js"></script>
     <script defer src="https://unpkg.com/@spotify/basic-pitch/dist/basic-pitch.js"></script>
+
+    <!-- JSZip para el export de datos (RGPD) — cargado por CDN, no vía bundler -->
+    <script defer src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 </head>
 <body>
     <div class="app-container">
         <!-- Header -->
         <header class="header">
             <div class="logo">
-                <i class="fas fa-music"></i>
-                <h1>PianoStudy</h1>
+                <img src="assets/img/logo/PianoStudy_horizontal_2400px.png" alt="PianoStudy" class="logo-img">
+                <h1 class="visually-hidden">PianoStudy</h1>
             </div>
             <div class="user-section" style="display:flex;align-items:center;gap:0.75rem;">
                 <div id="user-info" class="user-info hidden">
@@ -703,16 +714,249 @@
                 <!-- Settings Section -->
                 <div id="settings" class="section">
                     <h2>Ajustes</h2>
-                    <div class="settings-card">
-                        <div class="settings-row">
-                            <h3 style="margin:0">IA (Google Gemini)</h3>
-                            <div class="ai-status" aria-label="Estado de IA">
-                                <span id="ai-status-dot" class="ai-status-dot ai-status-dot--off" aria-hidden="true"></span>
-                                <span id="ai-status-text" class="ai-status-text">IA Inactiva</span>
-                            </div>
-                        </div>
 
-                        <small class="settings-help">La IA se ejecuta a través de nuestro servidor; no necesitas configurar ninguna API key.</small>
+                    <div class="context-help">
+                        <i class="fas fa-circle-info" aria-hidden="true"></i>
+                        <p>Gestiona tu cuenta, tus preferencias y tus datos. Los cambios se guardan al confirmarlos.</p>
+                    </div>
+
+                    <!-- Solo visible cuando NO hay sesión -->
+                    <div class="settings-signed-out" id="settings-signed-out" style="display:none">
+                        <div class="settings-card">
+                            <p>Iniciá sesión para gestionar tu cuenta, tus preferencias y tus datos.</p>
+                        </div>
+                    </div>
+
+                    <!-- Todo lo demás visible solo con sesión -->
+                    <div class="settings-signed-in" id="settings-signed-in">
+
+                        <!-- 1. Cuenta -->
+                        <section class="settings-card">
+                            <h3 class="settings-card-title">Cuenta</h3>
+
+                            <div class="settings-field">
+                                <label class="settings-label" for="settings-email">Email</label>
+                                <div class="settings-inline">
+                                    <input class="settings-input" id="settings-email" type="email" readonly>
+                                    <button class="btn-secondary" data-action="settings-change-email" type="button">Cambiar email</button>
+                                </div>
+                                <small class="settings-help">Al cambiarlo te enviaremos un mail de verificación al nuevo email.</small>
+                            </div>
+
+                            <div class="settings-field">
+                                <label class="settings-label" for="settings-display-name">Nombre público</label>
+                                <input class="settings-input" id="settings-display-name" type="text" autocomplete="name" placeholder="Tu nombre">
+                            </div>
+
+                            <div class="settings-field">
+                                <label class="settings-label" for="settings-username">Usuario</label>
+                                <input class="settings-input" id="settings-username" type="text" autocomplete="username" placeholder="tu_usuario">
+                                <small class="settings-help">Solo letras, números y _. Se usa para iniciar sesión.</small>
+                            </div>
+
+                            <div class="settings-actions">
+                                <button class="btn-primary" data-action="settings-save-profile" type="button">Guardar cambios</button>
+                                <button class="btn-secondary" data-action="settings-change-password" type="button">Cambiar contraseña</button>
+                            </div>
+                        </section>
+
+                        <!-- 2. Privacidad y datos (RGPD) -->
+                        <section class="settings-card">
+                            <h3 class="settings-card-title">Privacidad y datos</h3>
+
+                            <div class="settings-field">
+                                <div class="settings-inline settings-inline--between">
+                                    <div>
+                                        <label class="settings-label" for="settings-ai-consent">
+                                            Uso de mis grabaciones para mejorar la IA
+                                        </label>
+                                        <small class="settings-help">Opcional. Podés cambiar esto cuando quieras.</small>
+                                    </div>
+                                    <label class="settings-toggle">
+                                        <input type="checkbox" id="settings-ai-consent">
+                                        <span class="settings-toggle-slider" aria-hidden="true"></span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="settings-field">
+                                <label class="settings-label">Descargar mis datos</label>
+                                <small class="settings-help">
+                                    Ejercé tu derecho de portabilidad (RGPD art. 20). Te vamos a preparar un ZIP con
+                                    todos tus datos: perfil, licks, grabaciones (audio incluido), artistas propios,
+                                    canciones favoritas y sesiones de práctica.
+                                </small>
+                                <div class="settings-actions">
+                                    <button class="btn-secondary" data-action="settings-export-data" type="button" id="settings-export-btn">
+                                        <i class="fas fa-download"></i>
+                                        <span>Descargar mis datos (.zip)</span>
+                                    </button>
+                                </div>
+                                <small class="settings-help" id="settings-export-status" style="display:none"></small>
+                            </div>
+
+                            <div class="settings-danger">
+                                <h4 class="settings-danger-title">
+                                    <i class="fas fa-triangle-exclamation"></i> Eliminar mi cuenta
+                                </h4>
+                                <p class="settings-help">
+                                    Tu cuenta y todos tus datos se marcarán para eliminación y se borrarán
+                                    definitivamente en 30 días. Podés cancelar iniciando sesión antes de esa fecha.
+                                </p>
+                                <button class="btn-danger" data-action="settings-delete-account" type="button">
+                                    Eliminar mi cuenta
+                                </button>
+                            </div>
+                        </section>
+
+                        <!-- 3. Preferencias de práctica -->
+                        <section class="settings-card">
+                            <h3 class="settings-card-title">Preferencias de práctica</h3>
+                            <div class="settings-field">
+                                <label class="settings-label" for="settings-default-style">Estilo musical por defecto</label>
+                                <select class="settings-input auth-select" id="settings-default-style">
+                                    <option value="">Sin preferencia (auto)</option>
+                                    <option value="bebop">Bebop</option>
+                                    <option value="hard-bop">Hard bop</option>
+                                    <option value="son-cubano">Son cubano</option>
+                                    <option value="latin-jazz">Latin jazz</option>
+                                    <option value="bolero">Bolero</option>
+                                    <option value="jazz-colombiano">Jazz colombiano</option>
+                                    <option value="blues">Blues</option>
+                                </select>
+                                <small class="settings-help">
+                                    El motor de IA usa este estilo como base cuando la grabación no declara uno.
+                                </small>
+                                <div class="settings-actions">
+                                    <button class="btn-primary" data-action="settings-save-default-style" type="button">Guardar</button>
+                                </div>
+                            </div>
+                        </section>
+
+                        <!-- 4. Estado operativo de la IA -->
+                        <section class="settings-card settings-card--muted">
+                            <div class="settings-row">
+                                <h3 class="settings-card-title" style="margin:0">Estado de la IA</h3>
+                                <div class="ai-status" aria-label="Estado de IA">
+                                    <span id="ai-status-dot" class="ai-status-dot ai-status-dot--off" aria-hidden="true"></span>
+                                    <span id="ai-status-text" class="ai-status-text">IA Inactiva</span>
+                                </div>
+                            </div>
+                            <small class="settings-help">La IA se ejecuta a través de nuestro servidor; no necesitás configurar ninguna API key.</small>
+                        </section>
+
+                    </div>
+                </div>
+
+                <!-- ── Modales de Ajustes ─────────────────────────────────── -->
+
+                <!-- Cambiar contraseña -->
+                <div id="settings-change-password-overlay" class="auth-overlay" role="dialog" aria-modal="true" aria-label="Cambiar contraseña">
+                    <div class="auth-modal">
+                        <button class="auth-modal-close" data-action="settings-close-cp" aria-label="Cerrar">&times;</button>
+                        <p class="auth-recovery-title" style="margin-bottom:0.75rem">
+                            <i class="fas fa-key" style="color:var(--accent-green);margin-right:0.4rem"></i>
+                            Cambiar contraseña
+                        </p>
+                        <form id="settings-cp-form" novalidate autocomplete="off">
+                            <input type="text" name="username" autocomplete="username" style="display:none">
+                            <div class="auth-field">
+                                <label class="auth-label" for="settings-cp-current">Contraseña actual</label>
+                                <input class="auth-input" id="settings-cp-current" type="password" autocomplete="current-password" required>
+                            </div>
+                            <div class="auth-field">
+                                <label class="auth-label" for="settings-cp-new">Nueva contraseña</label>
+                                <input class="auth-input" id="settings-cp-new" type="password" autocomplete="new-password" required>
+                            </div>
+                            <div class="auth-field">
+                                <label class="auth-label" for="settings-cp-confirm">Confirmar nueva contraseña</label>
+                                <input class="auth-input" id="settings-cp-confirm" type="password" autocomplete="new-password" required>
+                            </div>
+                            <p class="auth-error" id="settings-cp-error" role="alert"></p>
+                            <button type="submit" class="auth-submit-btn">
+                                <span class="auth-spinner" style="display:none"></span>
+                                <span class="auth-btn-label">Guardar</span>
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Cambiar email -->
+                <div id="settings-change-email-overlay" class="auth-overlay" role="dialog" aria-modal="true" aria-label="Cambiar email">
+                    <div class="auth-modal">
+                        <button class="auth-modal-close" data-action="settings-close-ce" aria-label="Cerrar">&times;</button>
+                        <p class="auth-recovery-title" style="margin-bottom:0.5rem">
+                            <i class="fas fa-envelope" style="color:var(--accent-green);margin-right:0.4rem"></i>
+                            Cambiar email
+                        </p>
+                        <p class="auth-recovery-help">
+                            Te vamos a enviar un mail de verificación al nuevo email. El cambio se aplica cuando
+                            confirmes ese mail.
+                        </p>
+                        <form id="settings-ce-form" novalidate autocomplete="off">
+                            <div class="auth-field">
+                                <label class="auth-label" for="settings-ce-new">Nuevo email</label>
+                                <input class="auth-input" id="settings-ce-new" type="email" autocomplete="email" required>
+                            </div>
+                            <p class="auth-error" id="settings-ce-error" role="alert"></p>
+                            <button type="submit" class="auth-submit-btn">
+                                <span class="auth-spinner" style="display:none"></span>
+                                <span class="auth-btn-label">Enviar verificación</span>
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Eliminar cuenta (doble confirmación) -->
+                <div id="settings-delete-overlay" class="auth-overlay" role="dialog" aria-modal="true" aria-label="Eliminar cuenta">
+                    <div class="auth-modal">
+                        <button class="auth-modal-close" data-action="settings-close-del" aria-label="Cerrar">&times;</button>
+                        <p class="auth-recovery-title" style="margin-bottom:0.5rem">
+                            <i class="fas fa-triangle-exclamation" style="color:var(--accent-red);margin-right:0.4rem"></i>
+                            Eliminar mi cuenta
+                        </p>
+                        <p class="auth-recovery-help">
+                            Tu cuenta y todos tus datos se marcarán para eliminación y se borrarán
+                            <strong>definitivamente en 30 días</strong>. Podés cancelar iniciando sesión antes.
+                        </p>
+                        <form id="settings-del-form" novalidate autocomplete="off">
+                            <div class="auth-field">
+                                <label class="auth-label" for="settings-del-confirm">Escribí <code>ELIMINAR</code> para confirmar</label>
+                                <input class="auth-input" id="settings-del-confirm" type="text" autocomplete="off" placeholder="ELIMINAR" required>
+                            </div>
+                            <div class="auth-field">
+                                <label class="auth-label" for="settings-del-password">Contraseña actual</label>
+                                <input class="auth-input" id="settings-del-password" type="password" autocomplete="current-password" required>
+                            </div>
+                            <p class="auth-error" id="settings-del-error" role="alert"></p>
+                            <button type="submit" class="auth-submit-btn auth-submit-btn--danger" id="settings-del-submit" disabled>
+                                <span class="auth-spinner" style="display:none"></span>
+                                <span class="auth-btn-label">Eliminar mi cuenta</span>
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Cancelar eliminación pendiente (al login si aplica) -->
+                <div id="settings-cancel-deletion-overlay" class="auth-overlay" role="dialog" aria-modal="true" aria-label="Cancelar eliminación">
+                    <div class="auth-modal">
+                        <p class="auth-recovery-title" style="margin-bottom:0.5rem">
+                            <i class="fas fa-hourglass-half" style="color:var(--accent-blue);margin-right:0.4rem"></i>
+                            Tu cuenta está programada para eliminación
+                        </p>
+                        <p class="auth-recovery-help" id="settings-cancel-deletion-help">
+                            Vamos a borrar definitivamente tus datos el <span id="settings-cancel-deletion-date">—</span>.
+                            Si te arrepentiste, podés cancelar ahora.
+                        </p>
+                        <div class="settings-actions">
+                            <button class="btn-primary" data-action="settings-cancel-deletion" type="button">
+                                <i class="fas fa-rotate-left"></i>
+                                <span>Cancelar eliminación</span>
+                            </button>
+                            <button class="btn-secondary" data-action="settings-keep-deletion" type="button">
+                                Mantener la eliminación
+                            </button>
+                        </div>
                     </div>
                 </div>
             </section>

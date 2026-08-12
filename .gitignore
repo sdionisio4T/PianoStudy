@@ -1,16 +1,25 @@
+# Dependencias / build
+node_modules/
+dist/
+
 # Backups locales — pueden contener datos personales de usuarios
 # (grabaciones de audio, emails en el dump de DB). Ver scripts/backup/README.md.
 backups/
 
-# Dependencias / artefactos comunes
-node_modules/
-dist/
-
-# Vite / entornos locales con secretos (no aplica hoy, ninguna var es secreta,
-# pero se deja el patrón estándar por si a futuro se agrega algo sensible)
+# Entornos locales / secretos
+#
+# `.env.development` y `.env.production` SÍ están commiteados: solo contienen
+# VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY, que son públicas por diseño
+# (la anon key viaja al cliente en el bundle de Vite; la seguridad real la
+# hace Row Level Security del lado del server). Ver README.md → "Variables
+# de entorno" y `.env.example` para el detalle.
+#
+# Si algún día agregás un secreto real al frontend, ponelo en `.env.local`
+# (nunca commiteado) — nunca en los .env.* que sí van al repo.
 .env.local
 .env.*.local
 
-# Backup del .git anterior (se movió acá al rehacer el repo desde cero — es
-# recuperable localmente pero NO tiene que entrar al historial nuevo).
-_pendiente_revision/git-old/
+# Cache local del CLI de Supabase (project-ref, versions, pooler-url, etc.)
+# Se regenera solo al hacer `supabase link` — no debería ir al repo.
+supabase/.temp/
+

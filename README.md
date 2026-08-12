@@ -2,7 +2,7 @@
 
 Aplicación web para pianistas: grabá sesiones de práctica, analizalas con MIR (Music Information Retrieval) real, recibí feedback generado por IA especializado en jazz afrocubano/latino/colombiano, y armá tu biblioteca personal de licks.
 
-Este README documenta la arquitectura **post-split** del proyecto (Fase 2 del roadmap de seguridad/arquitectura, ver `DIAGNOSTICO_Y_PLAN.md`). Si buscás el historial de decisiones de una sesión de trabajo remota puntual, mirá `RESUMEN_SESION_REMOTA_*.md`.
+Este README documenta la arquitectura **post-split** del proyecto (Fase 2 del roadmap de seguridad/arquitectura, ver [`docs/DIAGNOSTICO_Y_PLAN.md`](docs/DIAGNOSTICO_Y_PLAN.md)). Si buscás el historial de decisiones de una sesión de trabajo remota puntual, mirá [`docs/sessions/`](docs/sessions).
 
 ---
 
@@ -52,7 +52,7 @@ Hoy PianoStudy es gratuito. Hay un esqueleto preparado (no activo) para un plan 
 | CI | GitHub Actions (build + test en cada PR, no despliega) |
 | Pagos | Stripe (esqueleto preparado, no configurado — ver sección Roadmap) |
 
-Essentia.js, basic-pitch, el cliente de Supabase y la API de YouTube se cargan como `<script>` de CDN en `index.html`, **no** están en `package.json` ni pasan por el bundler — es una decisión deliberada para no descargar/versionar esas librerías pesadas (WASM incluido) todavía. Ver tarea 2.4 pendiente en `DIAGNOSTICO_Y_PLAN.md` si se quiere cambiar eso.
+Essentia.js, basic-pitch, el cliente de Supabase y la API de YouTube se cargan como `<script>` de CDN en `index.html`, **no** están en `package.json` ni pasan por el bundler — es una decisión deliberada para no descargar/versionar esas librerías pesadas (WASM incluido) todavía. Ver tarea 2.4 pendiente en [`docs/DIAGNOSTICO_Y_PLAN.md`](docs/DIAGNOSTICO_Y_PLAN.md) si se quiere cambiar eso.
 
 ## Estructura de carpetas
 
@@ -89,8 +89,9 @@ Essentia.js, basic-pitch, el cliente de Supabase y la API de YouTube se cargan c
 │
 ├── supabase/
 │   ├── functions/
-│   │   ├── anthropic-proxy/       # proxy a Anthropic — JWT + rate limit, key server-side
-│   │   ├── gemini-proxy/          # proxy a Gemini — JWT + rate limit, key server-side (el que usa la app hoy)
+│   │   ├── groq-proxy/            # proxy a Groq (Llama 3.3 70B) — proveedor PRIMARIO de IA
+│   │   ├── gemini-proxy/          # proxy a Gemini — proveedor SECUNDARIO (fallback si Groq falla)
+│   │   ├── anthropic-proxy/       # proxy a Anthropic — preparado, no usado desde el cliente todavía
 │   │   ├── stripe-webhook/        # esqueleto de Fase 3, no conectado (ver sección Roadmap)
 │   │   └── _shared/rateLimiter.ts # lógica de rate limiting, compartida y testeada
 │   └── migrations/                # schema versionado en git (ver sección Base de datos)
@@ -103,10 +104,13 @@ Essentia.js, basic-pitch, el cliente de Supabase y la API de YouTube se cargan c
 ├── legal/                         # borrador de Términos de Servicio y Política de Privacidad
 ├── .github/workflows/ci.yml       # build + test en cada PR
 │
-├── DIAGNOSTICO_Y_PLAN.md          # roadmap de seguridad/arquitectura completo, con checklist
-├── RUNBOOK_DEPLOY.md              # cómo desplegar (manual, hasta que haya CD real)
-├── RUNBOOK_DISASTER_RECOVERY.md   # cómo restaurar código/DB/storage ante un desastre
-└── _pendiente_revision/           # archivos reemplazados que no se borraron todavía (ver su README)
+├── .env.example                   # plantilla de variables de entorno
+│
+└── docs/
+    ├── DIAGNOSTICO_Y_PLAN.md          # roadmap de seguridad/arquitectura completo, con checklist
+    ├── RUNBOOK_DEPLOY.md              # cómo desplegar (manual, hasta que haya CD real)
+    ├── RUNBOOK_DISASTER_RECOVERY.md   # cómo restaurar código/DB/storage ante un desastre
+    └── sessions/                      # bitácoras de sesiones de trabajo remoto (una por fecha)
 ```
 
 ## Cómo está organizado el frontend (post-split)
@@ -122,9 +126,7 @@ class PianoStudyApp {
 Object.assign(PianoStudyApp.prototype, stateMixin, uiMixin, controllersMixin, audioFlowMixin);
 ```
 
-**Por qué mixin y no 5 clases separadas:** el objetivo era reorganizar archivos sin rediseñar cómo se comunican entre sí 171 métodos que hoy comparten `this` libremente. Con el patrón mixin, el resultado en runtime es exactamente el mismo objeto único de siempre — cero cambio de comportamiento, es una migración de archivos, no un rediseño. El split se verificó reconstruyendo los 171 métodos en su orden original a partir de los 5 archivos y comparando el resultado byte a byte contra el `app.js` original (ver `_pendiente_revision/README.md`).
-
-El `app.js` original que existía antes del split está en `_pendiente_revision/app.js`, no se borró — ver ese README para el criterio de cuándo es seguro borrarlo.
+**Por qué mixin y no 5 clases separadas:** el objetivo era reorganizar archivos sin rediseñar cómo se comunican entre sí 171 métodos que hoy comparten `this` libremente. Con el patrón mixin, el resultado en runtime es exactamente el mismo objeto único de siempre — cero cambio de comportamiento, es una migración de archivos, no un rediseño. El split se verificó reconstruyendo los 171 métodos en su orden original a partir de los 5 archivos y comparando el resultado byte a byte contra el `app.js` original.
 
 `assets/js/modules/auth-ui.js` es un módulo aparte, montado directamente en `index.html` junto a `app-init.js`, no forma parte de la clase `PianoStudyApp`.
 
@@ -148,25 +150,26 @@ npm run preview   # sirve dist/ en http://localhost:4173, sin este problema de C
 
 ## Variables de entorno
 
-Vite expone al cliente cualquier variable que empiece con `VITE_`, definida en `.env.development` (para `npm run dev`) o `.env.production` (para `npm run build`). Hoy ambos archivos tienen los mismos valores porque no existe un proyecto Supabase separado para desarrollo:
+Vite expone al cliente cualquier variable que empiece con `VITE_`, definida en `.env.development` (para `npm run dev`) o `.env.production` (para `npm run build`). Ver [`.env.example`](.env.example) para la plantilla comentada. Hoy ambos archivos tienen los mismos valores porque no existe un proyecto Supabase separado para desarrollo:
 
 | Variable | Dónde se usa | ¿Es secreta? |
 |---|---|---|
 | `VITE_SUPABASE_URL` | `assets/js/modules/supabase-client.js` | No — diseñada para viajar al cliente |
 | `VITE_SUPABASE_ANON_KEY` | `assets/js/modules/supabase-client.js` | No — el acceso real lo controla RLS en el servidor |
 
-Ninguna de las dos es secreta, por eso ambos `.env.*` están commiteados (no en `.gitignore`).
+Ninguna de las dos es secreta, por eso ambos `.env.*` están commiteados (no en `.gitignore`). Si querés un entorno propio con otros valores, copiá `.env.example` a `.env.local` (ese sí está ignorado).
 
 **Secrets del lado del servidor** (Supabase Dashboard → Project Settings → Edge Functions → Secrets — **no van en ningún archivo de este repo**):
 
 | Secret | Usado por | Estado |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | `supabase/functions/anthropic-proxy` | Pendiente de cargar (paso 0.1 del roadmap) |
-| `GEMINI_API_KEY` | `supabase/functions/gemini-proxy` | Pendiente de cargar (paso 0.1 del roadmap) |
-| `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | Los 3 edge functions | Inyectadas automáticamente por Supabase, no hace falta cargarlas a mano |
+| `GROQ_API_KEY` | `supabase/functions/groq-proxy` | **Proveedor primario de IA** — cargar en Supabase. Sacala en https://console.groq.com/keys (free tier generoso). |
+| `GEMINI_API_KEY` | `supabase/functions/gemini-proxy` | **Proveedor secundario** — se usa si Groq falla. Sacala en https://aistudio.google.com/app/apikey. |
+| `ANTHROPIC_API_KEY` | `supabase/functions/anthropic-proxy` | Opcional — el cliente no la llama todavía. |
+| `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | Los 4 edge functions | Inyectadas automáticamente por Supabase, no hace falta cargarlas a mano |
 | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | `supabase/functions/stripe-webhook` | No configurado — Fase 3, ver Roadmap |
 
-Sin `ANTHROPIC_API_KEY`/`GEMINI_API_KEY` cargadas, los proxies responden `500` — la app sigue funcionando para todo lo demás, pero el análisis de IA cae al fallback local (`getFallbackAnalysis`/`getFallbackAnswer` en `AIAnalysisEngine.js`).
+**Con al menos `GROQ_API_KEY` O `GEMINI_API_KEY` cargada la IA funciona** — el cliente intenta Groq primero, y si falla o no está configurada, cae automáticamente a Gemini. Si las dos fallan, se usa el fallback local (`getFallbackAnalysis`/`getFallbackAnswer` en `AIAnalysisEngine.js`) — la app sigue usable, solo pierde el análisis con IA.
 
 Para los scripts de backup (`scripts/backup/`) hay variables de entorno adicionales a nivel de sistema operativo (`SUPABASE_DB_URL`, `SUPABASE_SERVICE_ROLE_KEY`) — ver `scripts/backup/README.md`, son independientes de las de Vite.
 
@@ -188,41 +191,49 @@ El workflow de GitHub Actions (`.github/workflows/ci.yml`) corre estos tests y e
 
 ## Deploy
 
-Manual por ahora — ver `RUNBOOK_DEPLOY.md` para los pasos completos (Netlify, Vercel, GitHub Pages, y el deploy separado de las Edge Functions). Resumen:
+Manual por ahora — ver [`docs/RUNBOOK_DEPLOY.md`](docs/RUNBOOK_DEPLOY.md) para los pasos completos (Netlify, Vercel, GitHub Pages, y el deploy separado de las Edge Functions). Resumen:
 
 ```bash
 npm run build     # genera dist/ con cache-busting automático (nombres con hash)
 ```
 
-`dist/` se puede servir desde cualquier hosting estático. Las Edge Functions (`anthropic-proxy`, `gemini-proxy`, `stripe-webhook`) se despliegan aparte con `supabase functions deploy <nombre>` — el build del frontend no las toca.
+`dist/` se puede servir desde cualquier hosting estático. Las Edge Functions (`groq-proxy`, `gemini-proxy`, `anthropic-proxy`, `stripe-webhook`) se despliegan aparte con `supabase functions deploy <nombre>` — el build del frontend no las toca.
 
 ## Flujo de las funciones de IA
+
+`AIAnalysisEngine.js` intenta **Groq primero** (rápido, free tier generoso) y cae a **Gemini** si Groq falla o no está configurado. Si los dos fallan, usa un fallback local (`getFallbackAnalysis`/`getFallbackAnswer`) — la app sigue usable sin IA, solo con menos detalle.
 
 ```mermaid
 sequenceDiagram
     participant U as Usuario (browser)
     participant E as AIAnalysisEngine.js
-    participant P as gemini-proxy (Edge Function)
-    participant G as Gemini API
+    participant G as groq-proxy (Edge Function)
+    participant M as gemini-proxy (Edge Function)
+    participant API as Groq / Gemini API
 
     U->>E: analyzePerformance(audioAnalysis) / answerQuestion(...)
     E->>E: buildAnalysisPrompt() / buildQuestionPrompt()<br/>(incluye guía específica por estilo si se declaró uno)
-    E->>P: supabase.functions.invoke('gemini-proxy', { prompt, systemPrompt })
-    Note over P: 1. Verifica el JWT del usuario (auth.getUser)
-    Note over P: 2. Rate limit — 10 req/min por user_id
-    Note over P: 3. (Fase 3, comentado/inerte) gate de plan premium
-    P->>G: fetch a la API de Gemini con GEMINI_API_KEY (solo server-side)
-    G-->>P: respuesta JSON
-    P-->>E: { status, body }
+    E->>G: supabase.functions.invoke('groq-proxy', { prompt, systemPrompt })
+    Note over G: 1. Verifica el JWT del usuario (auth.getUser)<br/>2. Rate limit — 10 req/min por user_id
+    G->>API: fetch a Groq con GROQ_API_KEY (solo server-side)
+    alt Groq responde OK
+        API-->>G: JSON
+        G-->>E: { status, body }
+    else Groq falla o sin key
+        E->>M: fallback → invoke('gemini-proxy', ...)
+        M->>API: fetch a Gemini con GEMINI_API_KEY
+        API-->>M: JSON
+        M-->>E: { status, body }
+    end
     E->>E: parseAIResponse()
     alt éxito
         E-->>U: análisis / respuesta de la IA
-    else error o key no configurada
+    else los dos proveedores fallaron
         E-->>U: fallback local (getFallbackAnalysis / getFallbackAnswer)
     end
 ```
 
-`anthropic-proxy` sigue el mismo patrón (JWT + rate limit + key server-side) pero **no lo llama nada del cliente todavía** — está preparado para cuando se necesite (por ejemplo, un "director" de IA en NeuralJam, ver roadmap del proyecto hermano `AI-Duet-Local`). La API key nunca vive en el cliente en ninguno de los dos casos — eso fue la Fase 0 del roadmap de seguridad.
+`anthropic-proxy` sigue el mismo patrón (JWT + rate limit + key server-side) pero **no lo llama nada del cliente todavía** — está preparado para cuando se necesite (por ejemplo, un "director" de IA en NeuralJam, ver roadmap del proyecto hermano `AI-Duet-Local`). La API key nunca vive en el cliente en ninguno de los tres casos — eso fue la Fase 0 del roadmap de seguridad.
 
 ## Base de datos (Supabase)
 
@@ -237,12 +248,12 @@ Columnas de `user_profiles` relevantes para IA y pagos (agregadas en Fase 3, ver
 
 ## Seguridad — estado actual
 
-Resumen; el detalle completo con checklist está en `DIAGNOSTICO_Y_PLAN.md`.
+Resumen; el detalle completo con checklist está en [`docs/DIAGNOSTICO_Y_PLAN.md`](docs/DIAGNOSTICO_Y_PLAN.md).
 
 - ✅ API keys de IA fuera del cliente, proxies con JWT + rate limiting (Fase 0).
 - ✅ PBKDF2 (100k iteraciones) para la respuesta de seguridad de recuperación de cuenta.
 - ✅ `.innerHTML` auditado — todo el contenido dinámico pasa por `escapeHtml`.
-- ⚠️ El bucket `recordings` de Storage tiene lectura pública por URL directa — es una decisión de producto pendiente de confirmar, no un descuido (ver tarea 0.10/2.4 en `DIAGNOSTICO_Y_PLAN.md`).
+- ⚠️ El bucket `recordings` de Storage tiene lectura pública por URL directa — es una decisión de producto pendiente de confirmar, no un descuido (ver tarea 0.10/2.4 en [`docs/DIAGNOSTICO_Y_PLAN.md`](docs/DIAGNOSTICO_Y_PLAN.md)).
 - ⚠️ Falta cargar `ANTHROPIC_API_KEY`/`GEMINI_API_KEY` como secrets de Supabase para que la IA funcione en producción con el código actual (paso 0.1, pendiente del lado del usuario, no del código).
 
 ## Roadmap
@@ -254,17 +265,17 @@ Fases 0, 1 y 2 completas (seguridad, backup/DR, arquitectura). Fase 3 (pagos) ti
 - Gate de plan premium en `anthropic-proxy`/`gemini-proxy` — escrito pero **comentado a propósito**: activarlo hoy bloquearía a todos los usuarios, porque nadie tiene `plan = 'premium'` todavía.
 - `legal/terminos-de-servicio.md` / `legal/politica-de-privacidad.md` — borrador con las secciones de pagos ya redactadas pero comentadas, listas para descomentar cuando Stripe esté configurado.
 
-Ver `DIAGNOSTICO_Y_PLAN.md` para el roadmap completo, incluyendo la integración futura de NeuralJam Mirror como sección premium.
+Ver [`docs/DIAGNOSTICO_Y_PLAN.md`](docs/DIAGNOSTICO_Y_PLAN.md) para el roadmap completo, incluyendo la integración futura de NeuralJam Mirror como sección premium.
 
 ## Documentos relacionados
 
-- `DIAGNOSTICO_Y_PLAN.md` — diagnóstico completo y roadmap por fases, con checklist.
-- `RUNBOOK_DEPLOY.md` — deploy paso a paso.
-- `RUNBOOK_DISASTER_RECOVERY.md` — cómo restaurar código/DB/storage ante un desastre.
-- `supabase/migrations/README.md` — de dónde sale el schema versionado y qué falta verificar.
-- `scripts/backup/README.md` — setup de los backups automáticos.
-- `legal/` — borrador de Términos de Servicio y Política de Privacidad (sin revisión legal todavía).
-- `RESUMEN_SESION_REMOTA_*.md` — bitácora de sesiones de trabajo remoto puntuales.
+- [`docs/DIAGNOSTICO_Y_PLAN.md`](docs/DIAGNOSTICO_Y_PLAN.md) — diagnóstico completo y roadmap por fases, con checklist.
+- [`docs/RUNBOOK_DEPLOY.md`](docs/RUNBOOK_DEPLOY.md) — deploy paso a paso.
+- [`docs/RUNBOOK_DISASTER_RECOVERY.md`](docs/RUNBOOK_DISASTER_RECOVERY.md) — cómo restaurar código/DB/storage ante un desastre.
+- [`docs/sessions/`](docs/sessions) — bitácora de sesiones de trabajo remoto (una por fecha).
+- [`supabase/migrations/README.md`](supabase/migrations/README.md) — de dónde sale el schema versionado y qué falta verificar.
+- [`scripts/backup/README.md`](scripts/backup/README.md) — setup de los backups automáticos.
+- [`legal/`](legal) — borrador de Términos de Servicio y Política de Privacidad (sin revisión legal todavía).
 
 ## Licencia
 

@@ -2,7 +2,7 @@
 
 **Última actualización:** [FECHA DE PUBLICACIÓN]
 
-> ⚠️ **Borrador de trabajo, no publicado todavía.** Este documento fue redactado como punto de partida y contiene placeholders entre corchetes (`[ASÍ]`) que hay que completar antes de publicarlo — nombre legal del titular, email de contacto, jurisdicción, dirección si corresponde. Se recomienda que lo revise un abogado antes de ponerlo en producción, en particular por el tratamiento de datos de menores, el consentimiento para entrenamiento de modelos de IA y los requisitos de Stripe una vez que se active el cobro. Ver `RESUMEN_SESION_REMOTA_2026-08-09.md` para el detalle de qué falta.
+> ⚠️ **Borrador de trabajo, no publicado todavía.** Este documento fue redactado como punto de partida y contiene placeholders entre corchetes (`[ASÍ]`) que hay que completar antes de publicarlo — nombre legal del titular, email de contacto, jurisdicción, dirección si corresponde. Se recomienda que lo revise un abogado antes de ponerlo en producción, en particular por el tratamiento de datos de menores, el consentimiento para entrenamiento de modelos de IA y los requisitos de Stripe una vez que se active el cobro. Ver `../docs/sessions/2026-08-09.md` para el detalle de qué falta.
 
 ---
 

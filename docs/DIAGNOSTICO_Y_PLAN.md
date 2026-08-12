@@ -136,6 +136,111 @@ Para no ser injusto:
 
 ---
 
+### 2.7 Auditoría de seguridad 2026-08-10 — estado post-fixes + nuevos hallazgos
+
+Corrida sobre el proyecto Supabase nuevo `wdbeucosldkiphnygcce` (us-east-1),
+después de aplicar Fases 0/1/2 completas y agregar el proveedor Groq como
+IA primaria. Fuente de los warnings nuevos: Supabase Advisor automático
+(`get_advisors` de la MCP).
+
+#### ✅ Ya cerrado (verificado en el proyecto vivo)
+
+- **API keys fuera del cliente** — Groq, Gemini y Anthropic pasan por
+  edge functions con la key en `Deno.env`. El cliente nunca la ve.
+- **JWT + rate limit** — los 3 proxies validan `auth.getUser()` y aplican
+  10 req/min por `user_id` (ver `supabase/functions/_shared/rateLimiter.ts`).
+- **RLS en todas las tablas** — `licks`, `recordings`, `custom_artists`,
+  `user_profiles`, `practice_sessions`, `favorite_songs`. Cada usuario
+  solo ve/escribe sus filas.
+- **PBKDF2 100k iteraciones** para el hash de la respuesta de seguridad
+  (no SHA-256 pelado como estaba antes).
+- **`.innerHTML` auditado** — todo pasa por `escapeHtml`.
+- **CSP estricta** — `default-src 'self'`, whitelist explícita por origen.
+- **Trigger `handle_new_user`** — llena `user_profiles` automáticamente
+  al crear un usuario (evita filas huérfanas y bypass de RLS desde el
+  cliente al hacer signup con email confirmation activo).
+
+#### ⚠️ Hallazgos nuevos del Advisor 2026-08-10 (5 warnings)
+
+**🔴 IMPORTANTE — `handle_new_user()` ejecutable vía RPC**
+
+El trigger recién creado es `SECURITY DEFINER` (necesario para bypassear
+RLS al insertar en `user_profiles`), pero Supabase expone
+**cualquier función pública** vía `POST /rest/v1/rpc/<name>`. Eso significa
+que un usuario `anon` o `authenticated` puede llamar
+`/rest/v1/rpc/handle_new_user` directamente. Aunque el cuerpo requiere
+`NEW` (que no se puede setear desde RPC), es mejor cerrarlo del todo.
+
+- **Fix (1 línea SQL):**
+  ```sql
+  revoke execute on function public.handle_new_user() from anon, authenticated, public;
+  ```
+- **Referencia:** https://supabase.com/docs/guides/database/database-linter?lint=0028_anon_security_definer_function_executable
+
+**🟡 MEDIO — `get_email_by_username()` sin rate limit ni ofuscación**
+
+Función `SECURITY DEFINER` que devuelve el email dado un username. Uso
+previsto: login por username. Problema: alguien puede pegarle a la RPC
+para **enumerar qué usernames existen** en la app. Facilita ataques de
+credential stuffing y phishing dirigido.
+
+- **Mitigación mínima:** rate limit del lado de Supabase (Postgres
+  extensions o CDN edge). Alternativa más simple: mover el lookup a un
+  edge function propio con el rate limiter que ya tenemos.
+- **Aceptable si:** la app es privada o beta cerrada.
+- **Bloqueante si:** se publica abierto a internet.
+
+**🟡 MEDIO — Protección contra contraseñas filtradas desactivada**
+
+Supabase Auth puede chequear el password contra HaveIBeenPwned al signup
+y bloquear los que aparezcan en breaches conocidos. **Gratis, toggle en
+el dashboard.**
+
+- **Fix (30 segundos):** Dashboard → Authentication → Policies → toggle
+  "Leaked Password Protection" → ON.
+- **Referencia:** https://supabase.com/docs/guides/auth/password-security#password-strength-and-leaked-password-protection
+
+#### 🚧 Sigue abierto del diagnóstico original
+
+Cosas que no cambiaron desde la versión anterior de este documento — se
+recuperan acá porque son parte del panorama de seguridad completo:
+
+- **2.4 — Bucket `recordings` público por URL** — cualquiera con el link
+  directo puede bajar el audio. No puede listar los archivos de otros
+  usuarios (no hay endpoint que enumere), pero si el link se filtra el
+  archivo es accesible. Decisión de producto pendiente.
+- **5.5 — Data export** para usuarios (obligación GDPR si se apunta a
+  usuarios en UE).
+- **5.6 — Data deletion** ("right to be forgotten") — obligatorio en
+  varias jurisdicciones cuando se cobra o se procesan datos de menores.
+- **Rate limiter en memoria** — funciona por instancia del edge function.
+  Si escala horizontalmente, cada instancia cuenta separado. No es
+  crítico con pocos usuarios; considerar Redis/Upstash antes de 1000+ MAU.
+- **Sin ambiente de staging** — `.env.development` y `.env.production`
+  apuntan al mismo proyecto Supabase. Riesgo bajo mientras solo el owner
+  prueba, alto en cuanto se abra a terceros.
+
+#### 💡 Prioridades sugeridas (post-2026-08-10)
+
+**Para uso personal / pruebas locales:** nada bloqueante. Los 5 warnings
+no exponen datos de nadie hoy.
+
+**Antes de compartir la app con otra persona (aunque sea privado):**
+1. Aplicar el `REVOKE EXECUTE ON handle_new_user` (1 min)
+2. Activar Leaked Password Protection (30 seg)
+
+**Antes de publicar en internet abierto:**
+3. Mover `get_email_by_username` a edge function con rate limit
+4. Decidir el modelo de acceso del bucket `recordings` (público / privado
+   con URLs firmadas de 1h)
+5. Implementar data export + data deletion (5.5 + 5.6)
+
+**Antes de escalar a 100+ usuarios:**
+6. Ambiente de staging separado
+7. Rate limiter compartido entre instancias (Redis)
+
+---
+
 ## 3. Arquitectura — fortalezas y debilidades
 
 ### 3.1 Fortalezas

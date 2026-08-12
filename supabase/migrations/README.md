@@ -30,7 +30,7 @@ y para que detectes divergencias.
    schema futuro debería hacerse editando/agregando migraciones acá y aplicando
    con `supabase db push`, no directo en el dashboard — así el historial de git
    queda como fuente de verdad (punto 1.6 del roadmap, y precondición para
-   Fase 3 según `DIAGNOSTICO_Y_PLAN.md`).
+   Fase 3 según `../../docs/DIAGNOSTICO_Y_PLAN.md`).
 
 ## Orden de aplicación
 
