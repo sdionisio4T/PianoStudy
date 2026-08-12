@@ -15,7 +15,7 @@
 //      invoice.payment_failed.
 //   4. Implementar el flujo que crea el Checkout Session — eso NO es esta
 //      función, es la tarea 3.6 "UI de upgrade/paywall" del roadmap
-//      (DIAGNOSTICO_Y_PLAN.md), todavía no construida. Ese flujo tiene que
+//      (docs/DIAGNOSTICO_Y_PLAN.md), todavía no construida. Ese flujo tiene que
 //      pasar `client_reference_id: <supabase_user_id>` al crear la sesión de
 //      Stripe — este webhook depende de ese dato para saber a qué usuario de
 //      Supabase corresponde cada evento (ver el TODO puntual más abajo).

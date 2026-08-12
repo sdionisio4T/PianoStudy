@@ -2,32 +2,58 @@ import { db } from './supabase-client.js';
 
 export class AIAnalysisEngine {
     // NOTA (Fase 0 seguridad): esta clase ya no recibe ni usa una API key del
-    // cliente. Las llamadas a Gemini pasan por el edge function 'gemini-proxy',
-    // que lee la key desde Deno.env y valida el JWT del usuario autenticado.
+    // cliente. Las llamadas pasan por edge functions ('groq-proxy',
+    // 'gemini-proxy'), que leen la key desde Deno.env y validan el JWT del
+    // usuario autenticado.
+    //
+    // Cadena de fallback: Groq (rápido, free tier generoso) → Gemini → local.
+    // Si un proveedor no está configurado en Supabase o devuelve error, se
+    // intenta el siguiente automáticamente. Así la app funciona con cualquiera
+    // de los dos cargado.
+
+    async callGroq(prompt, systemPrompt = null) {
+        const { data, error } = await db.functions.invoke('groq-proxy', {
+            body: { prompt, systemPrompt: systemPrompt || undefined }
+        });
+        if (error) throw new Error(`Groq error: ${error.message || error}`);
+        if (!data || typeof data.status !== 'number' || data.status >= 400) {
+            throw new Error(`Groq error: ${data?.status ?? 'unknown'}`);
+        }
+        // Formato OpenAI-compat: choices[0].message.content
+        return String(data.body?.choices?.[0]?.message?.content || '').trim();
+    }
+
     async callGemini(prompt, systemPrompt = null) {
         const { data, error } = await db.functions.invoke('gemini-proxy', {
             body: { prompt, systemPrompt: systemPrompt || undefined }
         });
-
-        if (error) {
-            throw new Error(`API error: ${error.message || error}`);
-        }
+        if (error) throw new Error(`Gemini error: ${error.message || error}`);
         if (!data || typeof data.status !== 'number' || data.status >= 400) {
-            throw new Error(`API error: ${data?.status ?? 'unknown'}`);
+            throw new Error(`Gemini error: ${data?.status ?? 'unknown'}`);
         }
+        return String(data.body?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
+    }
 
-        return data.body;
+    // Devuelve el texto del primer proveedor que responda OK. Si los dos
+    // fallan, tira el error del último para que el caller pueda decidir el
+    // fallback local.
+    async callAI(prompt, systemPrompt = null) {
+        try {
+            return await this.callGroq(prompt, systemPrompt);
+        } catch (groqErr) {
+            console.warn('Groq no disponible, probando Gemini:', groqErr?.message || groqErr);
+            return await this.callGemini(prompt, systemPrompt);
+        }
     }
 
     async analyzePerformance(audioAnalysis, recordingMetadata = {}) {
         const prompt = this.buildAnalysisPrompt(audioAnalysis, recordingMetadata);
         try {
-            const data = await this.callGemini(prompt);
-            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            const text = await this.callAI(prompt);
             const analysis = this.parseAIResponse(text);
             return analysis || this.getFallbackAnalysis(audioAnalysis);
         } catch (error) {
-            console.error('Error calling Gemini API:', error);
+            console.error('AI no disponible (Groq y Gemini fallaron):', error);
             return this.getFallbackAnalysis(audioAnalysis);
         }
     }
@@ -38,11 +64,10 @@ export class AIAnalysisEngine {
 
         const prompt = this.buildQuestionPrompt(audioAnalysis, aiAnalysis, q);
         try {
-            const data = await this.callGemini(prompt);
-            const text = String(data?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
+            const text = await this.callAI(prompt);
             return text || this.getFallbackAnswer(audioAnalysis, aiAnalysis, q);
         } catch (error) {
-            console.error('Error calling Gemini API (Q&A):', error);
+            console.error('AI Q&A no disponible (Groq y Gemini fallaron):', error);
             return this.getFallbackAnswer(audioAnalysis, aiAnalysis, q);
         }
     }

@@ -5,7 +5,7 @@
 //
 // Limitación conocida: en memoria por instancia, se resetea en cold start y
 // no es consistente entre instancias si el edge function escala
-// horizontalmente. Ver RUNBOOK_DISASTER_RECOVERY.md / DIAGNOSTICO_Y_PLAN.md
+// horizontalmente. Ver docs/RUNBOOK_DISASTER_RECOVERY.md / docs/DIAGNOSTICO_Y_PLAN.md
 // 0.7 para el contexto completo.
 
 export interface RateLimiterOptions {

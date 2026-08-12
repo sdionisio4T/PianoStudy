@@ -1,7 +1,12 @@
-// Supabase Edge Function: gemini-proxy
-// Proxies requests to Google Gemini to avoid browser CORS limitations.
-// The API key lives only here (server-side secret) — the client never sees it.
-// Requires a valid Supabase JWT and applies a basic per-user rate limit.
+// Supabase Edge Function: groq-proxy
+// Proxies requests to Groq (OpenAI-compatible API) to avoid browser CORS
+// limitations. The API key lives only here (server-side secret) — the client
+// never sees it. Requires a valid Supabase JWT and applies a basic per-user
+// rate limit.
+//
+// Groq da inferencia muy rápida y tiene free tier generoso; se usa como
+// proveedor primario desde AIAnalysisEngine.js. Si falla o no está
+// configurado, el cliente cae automáticamente a gemini-proxy.
 
 /// <reference lib="deno.ns" />
 
@@ -14,11 +19,11 @@ const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const GEMINI_URL =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent';
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+// Modelo por defecto — llama-3.3-70b-versatile es el generalista más capaz
+// del free tier. Se puede sobreescribir desde el cliente pasando `model`.
+const DEFAULT_MODEL = 'llama-3.3-70b-versatile';
 
-// In-memory per-instance rate limit: 10 req/min por user_id.
-// Lógica testeada en tests/rateLimiter.test.js (ver supabase/functions/_shared/rateLimiter.ts).
 const rateLimiter = createRateLimiter({ limit: 10, windowMs: 60_000 });
 
 Deno.serve(async (req: Request) => {
@@ -56,31 +61,6 @@ Deno.serve(async (req: Request) => {
   }
   const userId = userData.user.id;
 
-  // TODO: conectar cuando se configure Stripe (Fase 3). Descomentar este
-  // bloque SOLO cuando haya usuarios reales con plan='premium' — si se
-  // activa antes, esto bloquea a TODOS los usuarios porque hoy nadie tiene
-  // plan='premium' (columna agregada en supabase/migrations/0004_plan_columns.sql,
-  // default 'free' para todos). Nota de producto pendiente: este es el proxy
-  // que usa el análisis de IA gratuito hoy (AIAnalysisEngine.js) — según
-  // docs/DIAGNOSTICO_Y_PLAN.md el plan free debería seguir teniendo análisis/Q&A
-  // básico. Gatear todo este endpoint por premium contradice eso; evaluar un
-  // gate más granular (ej. límite de requests distinto por plan) antes de
-  // descomentar esto en producción.
-  //
-  // const { data: profile, error: profileErr } = await supabaseClient
-  //   .from('user_profiles')
-  //   .select('plan, paid_until')
-  //   .eq('id', userId)
-  //   .maybeSingle();
-  // const isPremium = !profileErr && profile?.plan === 'premium'
-  //   && (!profile.paid_until || new Date(profile.paid_until) > new Date());
-  // if (!isPremium) {
-  //   return new Response(JSON.stringify({ error: 'Esta función requiere el plan Premium' }), {
-  //     status: 402,
-  //     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-  //   });
-  // }
-
   if (rateLimiter.isRateLimited(userId)) {
     return new Response(JSON.stringify({ error: 'Too many requests, slow down.' }), {
       status: 429,
@@ -89,7 +69,7 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { prompt, systemPrompt } = await req.json();
+    const { prompt, systemPrompt, model } = await req.json();
 
     if (!prompt || typeof prompt !== 'string') {
       return new Response(JSON.stringify({ error: 'Missing prompt' }), {
@@ -98,36 +78,34 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    // TODO(pendiente 0.1 — acción del usuario): cargar GEMINI_API_KEY en
-    // Supabase Dashboard → Project Settings → Edge Functions → Secrets antes
-    // de desplegar esta función. Sin esa env var, el proxy responde 500.
-    const apiKey = Deno.env.get('GEMINI_API_KEY');
+    const apiKey = Deno.env.get('GROQ_API_KEY');
     if (!apiKey) {
-      return new Response(JSON.stringify({ error: 'Server misconfigured: missing GEMINI_API_KEY' }), {
-        status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+      return new Response(
+        JSON.stringify({ error: 'Server misconfigured: missing GROQ_API_KEY' }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        },
+      );
     }
 
-    const payload: Record<string, unknown> = {
-      contents: [
-        {
-          role: 'user',
-          parts: [{ text: prompt }],
-        },
-      ],
+    const messages: Array<{ role: string; content: string }> = [];
+    if (systemPrompt && typeof systemPrompt === 'string') {
+      messages.push({ role: 'system', content: systemPrompt });
+    }
+    messages.push({ role: 'user', content: prompt });
+
+    const payload = {
+      model: typeof model === 'string' && model ? model : DEFAULT_MODEL,
+      messages,
+      temperature: 0.7,
     };
 
-    if (systemPrompt && typeof systemPrompt === 'string') {
-      payload.systemInstruction = {
-        parts: [{ text: systemPrompt }],
-      };
-    }
-
-    const res = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
+    const res = await fetch(GROQ_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(payload),
     });
@@ -137,10 +115,9 @@ Deno.serve(async (req: Request) => {
     try {
       body = JSON.parse(raw);
     } catch {
-      // leave as string
+      // deja como string
     }
 
-    // Always return 200 so supabase-js invoke doesn't throw transport errors.
     return new Response(JSON.stringify({ status: res.status, body }), {
       status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },

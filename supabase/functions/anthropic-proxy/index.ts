@@ -60,7 +60,7 @@ Deno.serve(async (req: Request) => {
   // activa antes, esto bloquea a TODOS los usuarios porque hoy nadie tiene
   // plan='premium' (columna agregada en supabase/migrations/0004_plan_columns.sql,
   // default 'free' para todos). Nota de producto pendiente: hoy este gate
-  // bloquea el endpoint completo; según DIAGNOSTICO_Y_PLAN.md el plan free
+  // bloquea el endpoint completo; según docs/DIAGNOSTICO_Y_PLAN.md el plan free
   // debería seguir teniendo algo de análisis/Q&A — decidir si conviene un
   // gate más granular (por ejemplo, un límite de uso distinto por plan en
   // vez de bloqueo total) antes de descomentar esto en producción.
