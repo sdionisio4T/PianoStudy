@@ -28,39 +28,104 @@ export class AudioAnalyzer {
             const audioBuffer = await this.audioContext.decodeAudioData(arrayBuffer);
             const channelData = audioBuffer.getChannelData(0);
 
-            let analysis = null;
-            let essentiaVector = null;
+            // Estructura base — se rellena progresivamente y cualquier motor
+            // que falle se sustituye por fallback, sin tirar los demás.
+            const analysis = {
+                duration: audioBuffer.duration,
+                sampleRate: audioBuffer.sampleRate,
+                numberOfChannels: audioBuffer.numberOfChannels,
+                tempo: null,
+                key: null,
+                loudness: null,
+                mfcc: [],
+                spectralCentroid: 0,
+                rhythmicComplexity: 0,
+                analysisProvider: 'unknown',
+                providersUsed: [],
+                providersFailed: [],
+            };
 
+            // Inicializar Essentia + convertir canal a vector.
+            let essentiaVector = null;
             try {
                 await this.init();
                 essentiaVector = this.essentia.arrayToVector(channelData);
-                analysis = {
-                    duration: audioBuffer.duration,
-                    sampleRate: audioBuffer.sampleRate,
-                    numberOfChannels: audioBuffer.numberOfChannels,
-                    tempo: this.detectTempo(essentiaVector, audioBuffer.sampleRate),
-                    key: this.detectKey(essentiaVector, audioBuffer.sampleRate),
-                    loudness: this.analyzeLoudness(essentiaVector),
-                    mfcc: this.extractMFCC(essentiaVector),
-                    spectralCentroid: this.getSpectralCentroid(essentiaVector, audioBuffer.sampleRate),
-                    rhythmicComplexity: this.getRhythmicComplexity(essentiaVector, audioBuffer.sampleRate),
-                    analysisProvider: 'essentia'
-                };
-            } catch (essErr) {
-                console.warn('Essentia no disponible, usando fallback local:', essErr);
-                analysis = this.buildFallbackAnalysis(audioBuffer);
+                analysis.providersUsed.push('essentia-init');
+            } catch (e) {
+                console.warn('Essentia init/arrayToVector falló:', e);
+                analysis.providersFailed.push('essentia-init');
             }
 
+            // Cada algoritmo de Essentia va en su propio try/catch: si uno
+            // tira una excepción de C++ (WASM sin exception catching), los
+            // demás sobreviven. Es la causa de que antes todo cayera a fallback.
+            if (essentiaVector) {
+                const runEssentia = (name, fn) => {
+                    try {
+                        const result = fn();
+                        analysis.providersUsed.push(name);
+                        return result;
+                    } catch (e) {
+                        console.warn(`Essentia ${name} falló:`, e?.message || e);
+                        analysis.providersFailed.push(name);
+                        return null;
+                    }
+                };
+
+                analysis.tempo = runEssentia('tempo', () => this.detectTempo(essentiaVector));
+                analysis.key = runEssentia('key', () => this.detectKey(essentiaVector));
+                analysis.loudness = runEssentia('loudness', () => this.analyzeLoudness(essentiaVector));
+                analysis.mfcc = runEssentia('mfcc', () => this.extractMFCC(essentiaVector)) || [];
+                analysis.spectralCentroid = runEssentia('centroid', () => this.getSpectralCentroid(essentiaVector, audioBuffer.sampleRate)) ?? 0;
+                analysis.rhythmicComplexity = runEssentia('rhythmic-complexity', () => this.getRhythmicComplexity(essentiaVector)) ?? 0;
+
+                try { essentiaVector.delete?.(); } catch { /* ignore */ }
+            }
+
+            // Rellenar con fallback los campos que quedaron null (sin sobreescribir los que Essentia sí resolvió).
+            const fallback = this.buildFallbackAnalysis(audioBuffer);
+            if (!analysis.tempo)    { analysis.tempo = fallback.tempo;       analysis.providersUsed.push('tempo-fallback'); }
+            if (!analysis.key)      { analysis.key = fallback.key;           analysis.providersUsed.push('key-fallback'); }
+            if (!analysis.loudness) { analysis.loudness = fallback.loudness; analysis.providersUsed.push('loudness-fallback'); }
+            if (!analysis.spectralCentroid) analysis.spectralCentroid = fallback.spectralCentroid;
+
+            // Etiqueta agregada — útil para el chip de la UI.
+            if (analysis.providersFailed.length === 0 && analysis.providersUsed.includes('essentia-init')) {
+                analysis.analysisProvider = 'essentia';
+            } else if (analysis.providersUsed.includes('essentia-init')) {
+                analysis.analysisProvider = 'essentia-partial';
+            } else {
+                analysis.analysisProvider = 'fallback';
+            }
+
+            // Transcripción MIDI por basic-pitch (opcional, aparte).
+            // basic-pitch está entrenada a 22050 Hz — hay que resamplear el AudioBuffer
+            // antes de pasárselo, si el original está a 44100/48000. Sin este paso el
+            // modelo devuelve 0 notas aunque el audio tenga música real.
             if (options.enableMidiTranscription) {
                 try {
-                    analysis.midiNotes = await this.transcribeToMidi(audioBlob);
+                    const resampled = await this._resampleForBasicPitch(audioBuffer, 22050);
+                    let notes = await this.transcribeToMidi(resampled);
+                    if (!Array.isArray(notes) || notes.length === 0) {
+                        // Fallback 1: intentar con el AudioBuffer original sin resamplear.
+                        notes = await this.transcribeToMidi(audioBuffer);
+                    }
+                    if (!Array.isArray(notes) || notes.length === 0) {
+                        // Fallback 2: intentar con el Blob crudo por si la build lo prefiere.
+                        notes = await this.transcribeToMidi(audioBlob);
+                    }
+                    analysis.midiNotes = Array.isArray(notes) ? notes : [];
+                    if (analysis.midiNotes.length > 0) {
+                        analysis.providersUsed.push(`basic-pitch (${analysis.midiNotes.length} notas)`);
+                    } else {
+                        analysis.providersFailed.push('basic-pitch (0 notas transcritas)');
+                    }
                 } catch (midiErr) {
-                    console.warn('Basic Pitch no disponible:', midiErr);
+                    console.warn('Basic Pitch falló:', midiErr);
                     analysis.midiNotes = [];
+                    analysis.providersFailed.push('basic-pitch');
                 }
             }
-
-            if (essentiaVector?.delete) essentiaVector.delete();
 
             return analysis;
         } catch (error) {
@@ -94,8 +159,20 @@ export class AudioAnalyzer {
         };
     }
 
-    detectTempo(vector, sampleRate) {
-        const result = this.essentia.RhythmExtractor2013(vector, sampleRate);
+    detectTempo(vector) {
+        // Intento 1: PercivalBpmEstimator, single-call, muy estable en la build web.
+        try {
+            const r = this.essentia.PercivalBpmEstimator(vector);
+            const bpm = Math.round(r?.bpm || 0);
+            if (bpm > 0) {
+                return { bpm, confidence: 0.75, ticks: [] };
+            }
+        } catch { /* fall through */ }
+
+        // Intento 2: RhythmExtractor2013 sin sampleRate.
+        // El segundo arg de RhythmExtractor2013 NO es sampleRate — es maxTempo (default 208).
+        // Pasar 44100 tira una excepción de C++ que no se puede capturar limpio.
+        const result = this.essentia.RhythmExtractor2013(vector);
         return {
             bpm: Math.round(result?.bpm || 0),
             confidence: Number(result?.confidence || 0),
@@ -104,15 +181,14 @@ export class AudioAnalyzer {
     }
 
     detectKey(vector) {
-        const frame = this.essentia.FrameCutter(vector).frame;
-        const windowed = this.essentia.Windowing(frame).frame;
-        const spectrum = this.essentia.Spectrum(windowed).spectrum;
-        const hpcp = this.essentia.HPCP(spectrum).hpcp;
-        const key = this.essentia.Key(hpcp);
+        // KeyExtractor hace toda la cadena internamente: frames → HPCP → Key.
+        // Reemplaza a la cadena manual (FrameCutter → Windowing → Spectrum → HPCP → Key)
+        // que estaba mal encadenada — HPCP necesita SpectralPeaks, no Spectrum crudo.
+        const r = this.essentia.KeyExtractor(vector);
         return {
-            key: key?.key || 'Desconocida',
-            scale: key?.scale || '',
-            strength: Number(key?.strength || 0)
+            key: r?.key || 'Desconocida',
+            scale: r?.scale || '',
+            strength: Number(r?.strength || 0)
         };
     }
 
@@ -154,13 +230,19 @@ export class AudioAnalyzer {
         return Number(centroid?.centroid || 0);
     }
 
-    getRhythmicComplexity(vector, sampleRate) {
-        const result = this.essentia.RhythmExtractor2013(vector, sampleRate);
-        const estimates = result?.estimates ? this.essentia.vectorToArray(result.estimates) : [];
-        if (estimates.length < 2) return 0;
-        const mean = estimates.reduce((a, b) => a + b, 0) / estimates.length;
-        const variance = estimates.reduce((s, v) => s + Math.pow(v - mean, 2), 0) / estimates.length;
-        return Math.sqrt(variance);
+    getRhythmicComplexity(vector) {
+        // Reutiliza el vector de estimates de RhythmExtractor2013 sin pasar sampleRate.
+        // Devuelve 0 silenciosamente si no hay estimates suficientes.
+        try {
+            const result = this.essentia.RhythmExtractor2013(vector);
+            const estimates = result?.estimates ? this.essentia.vectorToArray(result.estimates) : [];
+            if (estimates.length < 2) return 0;
+            const mean = estimates.reduce((a, b) => a + b, 0) / estimates.length;
+            const variance = estimates.reduce((s, v) => s + Math.pow(v - mean, 2), 0) / estimates.length;
+            return Math.sqrt(variance);
+        } catch {
+            return 0;
+        }
     }
 
     detectTempoFallback(audioBuffer) {
@@ -270,24 +352,60 @@ export class AudioAnalyzer {
         this.annotateWaveform(ctx, width, height);
     }
 
-    async transcribeToMidi(audioBlob) {
-        const bp = window.BasicPitch;
-        if (!bp || !bp.BasicPitch) return [];
+    // Resamplea un AudioBuffer al sample rate de destino, mezclándolo a mono.
+    // basic-pitch está entrenada en 22050 Hz mono — sin este paso, con audio
+    // grabado a 44100/48000 Hz estéreo el modelo devuelve 0 notas.
+    async _resampleForBasicPitch(audioBuffer, targetSR = 22050) {
+        if (!audioBuffer) return audioBuffer;
+        // Si ya está en el target y es mono, no hacemos nada.
+        if (audioBuffer.sampleRate === targetSR && audioBuffer.numberOfChannels === 1) {
+            return audioBuffer;
+        }
+        try {
+            const length = Math.max(1, Math.ceil(audioBuffer.duration * targetSR));
+            const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+            if (!OfflineCtx) return audioBuffer;
+            const offlineCtx = new OfflineCtx(1, length, targetSR);
+            // Mezclamos a mono manualmente para evitar recanalización rara del ctx.
+            const monoInput = offlineCtx.createBuffer(1, audioBuffer.length, audioBuffer.sampleRate);
+            const mono = monoInput.getChannelData(0);
+            const numCh = audioBuffer.numberOfChannels;
+            for (let ch = 0; ch < numCh; ch++) {
+                const chData = audioBuffer.getChannelData(ch);
+                for (let i = 0; i < chData.length; i++) mono[i] += chData[i] / numCh;
+            }
+            const src = offlineCtx.createBufferSource();
+            src.buffer = monoInput;
+            src.connect(offlineCtx.destination);
+            src.start();
+            return await offlineCtx.startRendering();
+        } catch (e) {
+            console.warn('Resample para basic-pitch falló, uso el buffer original:', e);
+            return audioBuffer;
+        }
+    }
 
+    async transcribeToMidi(audioSource) {
+        // audioSource puede ser un AudioBuffer (preferido) o un Blob (fallback).
+        // Lazy-load: basic-pitch + tf.js pesan ~1MB gzip. Solo se descargan cuando
+        // el usuario pide análisis IA por primera vez, no en la carga inicial de la app.
+        // Vite hace code-splitting automático — quedan en un chunk aparte.
         const {
             BasicPitch,
             noteFramesToTime,
             addPitchBendsToNoteEvents,
             outputToNotesPoly
-        } = bp;
+        } = await import('@spotify/basic-pitch');
 
-        const model = new BasicPitch('https://unpkg.com/@spotify/basic-pitch/model/model.json');
+        // Modelo alojado en jsDelivr apuntando a la MISMA versión pinneada en package.json,
+        // así el modelo y el runtime siempre coinciden. Es ~4MB, no tiene sentido bundlearlo.
+        const model = new BasicPitch('https://cdn.jsdelivr.net/npm/@spotify/basic-pitch@1.0.1/model/model.json');
         const frames = [];
         const onsets = [];
         const contours = [];
 
         await model.evaluateModel(
-            audioBlob,
+            audioSource,
             (f, o, c) => {
                 frames.push(...f);
                 onsets.push(...o);

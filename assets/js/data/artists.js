@@ -474,6 +474,80 @@ export const artists = [
       { title: "El Vuelo", year: 2020 }
     ],
     youtubeSearch: "Alejandro Rivas piano jazz colombiano"
+  },
+
+  // ─── BOSSA NOVA / PIANO BRASILEÑO ───────────────────────────────────────
+  {
+    id: "antonio-carlos-jobim",
+    name: "Antônio Carlos Jobim",
+    style: "bossanova",
+    description: "Pianista y compositor central de la bossa nova. Su economía melódica, armonía refinada y acompañamiento contenido son una escuela completa para el piano brasileño.",
+    photo: "",
+    albums: [{ title: "Wave", year: 1967 }, { title: "Stone Flower", year: 1970 }, { title: "The Composer of Desafinado", year: 1963 }],
+    youtubeSearch: "Antonio Carlos Jobim Wave piano"
+  },
+  {
+    id: "joao-donato",
+    name: "João Donato",
+    style: "bossanova",
+    description: "Pianista brasileño de groove inconfundible. Une bossa nova, samba-jazz y funk con una manera minimalista y profundamente rítmica de acompañar.",
+    photo: "",
+    albums: [{ title: "A Bad Donato", year: 1970 }, { title: "Quem É Quem", year: 1973 }, { title: "Donato Deodato", year: 1973 }],
+    youtubeSearch: "Joao Donato piano bossa nova"
+  },
+  {
+    id: "luiz-eca",
+    name: "Luiz Eça",
+    style: "bossanova",
+    description: "Pianista fundador de Tamba Trio. Su lenguaje de cámara combina voicings delicados, polirritmia y una escucha excepcional del espacio.",
+    photo: "",
+    albums: [{ title: "Tamba Trio", year: 1962 }, { title: "Avanço", year: 1963 }, { title: "Luiz Eça & Cordas", year: 1969 }],
+    youtubeSearch: "Luiz Eca Tamba Trio piano"
+  },
+  {
+    id: "sergio-mendes",
+    name: "Sérgio Mendes",
+    style: "bossanova",
+    description: "Pianista y arreglista que llevó la bossa nova a audiencias globales. Una referencia para estudiar arreglos, claridad rítmica y sonido de conjunto.",
+    photo: "",
+    albums: [{ title: "Sérgio Mendes & Brasil '66", year: 1966 }, { title: "Equinox", year: 1967 }, { title: "Stillness", year: 1970 }],
+    youtubeSearch: "Sergio Mendes piano bossa nova"
+  },
+  {
+    id: "cesar-camargo-mariano",
+    name: "César Camargo Mariano",
+    style: "bossanova",
+    description: "Figura esencial del piano brasileño moderno. Destaca por su sofisticación armónica, acompañamiento flexible y diálogo entre tradición brasileña y jazz.",
+    photo: "",
+    albums: [{ title: "São Paulo Brasil", year: 1980 }, { title: "Samambaia", year: 1981 }, { title: "Piano & Voz", year: 1974 }],
+    youtubeSearch: "Cesar Camargo Mariano piano"
+  },
+  {
+    id: "eliane-elias",
+    name: "Eliane Elias",
+    style: "bossanova",
+    description: "Pianista brasileña que integra técnica jazzística, bossa nova y canción. Excelente referencia para melodía, comping y fraseo contemporáneo.",
+    photo: "",
+    albums: [{ title: "Eliane Elias Plays Live", year: 1991 }, { title: "I Thought About You", year: 2013 }, { title: "Made in Brazil", year: 2015 }],
+    youtubeSearch: "Eliane Elias piano bossa nova"
+  },
+  {
+    id: "tania-maria",
+    name: "Tania Maria",
+    style: "bossanova",
+    description: "Pianista y cantante de gran energía rítmica. Su estilo conecta samba-jazz, improvisación y una relación muy percusiva con el teclado.",
+    photo: "",
+    albums: [{ title: "Piquant", year: 1981 }, { title: "Come With Me", year: 1983 }, { title: "Bela Vista", year: 1990 }],
+    youtubeSearch: "Tania Maria piano live"
+  },
+  {
+    id: "andre-mehmari",
+    name: "André Mehmari",
+    style: "bossanova",
+    description: "Pianista y compositor brasileño contemporáneo. Su trabajo cruza música de cámara, jazz y tradición brasileña con gran riqueza armónica.",
+    photo: "",
+    albums: [{ title: "Piano e Voz", year: 2007 }, { title: "Canteiro", year: 2015 }, { title: "Miramari", year: 2020 }],
+    youtubeSearch: "Andre Mehmari piano brazilian jazz"
   }
 ];
 
@@ -484,7 +558,8 @@ export const styleColors = {
   latinjazz:      "#00ff41",
   soncubano:      "#FFD700",
   bolero:         "#FF69B4",
-  jazzcolombiano: "#ff0040"
+  jazzcolombiano: "#ff0040",
+  bossanova:      "#35c9c0"
 };
 
 export const styleLabels = {
@@ -494,5 +569,6 @@ export const styleLabels = {
   latinjazz:      "Latin Jazz",
   soncubano:      "Son Cubano",
   bolero:         "Bolero",
-  jazzcolombiano: "Jazz Colombiano"
+  jazzcolombiano: "Jazz Colombiano",
+  bossanova:      "Bossa Nova"
 };

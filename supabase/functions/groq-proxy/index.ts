@@ -69,7 +69,7 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { prompt, systemPrompt, model } = await req.json();
+    const { prompt, systemPrompt, model, temperature, responseFormat } = await req.json();
 
     if (!prompt || typeof prompt !== 'string') {
       return new Response(JSON.stringify({ error: 'Missing prompt' }), {
@@ -77,6 +77,14 @@ Deno.serve(async (req: Request) => {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
+
+    // Clamps: temperature acotada [0, 1] (Groq acepta hasta 2 pero para nuestros
+    // casos análisis + Q&A no queremos ir arriba de 1); responseFormat solo
+    // acepta el literal 'json_object' — cualquier otra cosa se ignora.
+    const temp = Number.isFinite(temperature)
+      ? Math.min(1, Math.max(0, Number(temperature)))
+      : 0.7;
+    const wantsJson = responseFormat === 'json_object';
 
     const apiKey = Deno.env.get('GROQ_API_KEY');
     if (!apiKey) {
@@ -95,11 +103,14 @@ Deno.serve(async (req: Request) => {
     }
     messages.push({ role: 'user', content: prompt });
 
-    const payload = {
+    const payload: Record<string, unknown> = {
       model: typeof model === 'string' && model ? model : DEFAULT_MODEL,
       messages,
-      temperature: 0.7,
+      temperature: temp,
     };
+    if (wantsJson) {
+      payload.response_format = { type: 'json_object' };
+    }
 
     const res = await fetch(GROQ_URL, {
       method: 'POST',

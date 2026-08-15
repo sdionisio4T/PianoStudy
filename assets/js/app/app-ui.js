@@ -90,9 +90,8 @@ export const uiMixin = {
                 this.sendAnalysisChat();
             }
         });
-        document.getElementById('play-segment-audio-btn')?.addEventListener('click', () => {
-            this.playAnalysisSegment();
-        });
+        // NOTA: play-segment-audio-btn fue removido del HTML — el reproductor del análisis
+        // es ahora WaveSurfer con regiones clicables (ver _initAnalysisWavesurfer).
 
         // Modal
         document.querySelector('.close').addEventListener('click', () => this.closeModal());
@@ -257,6 +256,10 @@ export const uiMixin = {
                 this.playSelection();
                 return;
             }
+            if (action === 'editor-toggle-play') {
+                this.toggleEditorPlay();
+                return;
+            }
             if (action === 'editor-save-licks') {
                 this.savePhrasesToLicks();
                 return;
@@ -360,10 +363,7 @@ export const uiMixin = {
                 this.studyAudioUrl = null;
             }
 
-            if (this.analysisAudioUrl) {
-                this.cleanupObjectURL(this.analysisAudioUrl);
-                this.analysisAudioUrl = null;
-            }
+            this._teardownAnalysisWavesurfer?.();
         });
 
         this.setupStudyDropzone();
@@ -438,10 +438,8 @@ export const uiMixin = {
     },
 
     closeModal() {
-        // Si el editor está abierto, detener reproducción/loop para evitar que se “trabe”
-        this.stopEditorPlayback();
-        this.editorDragging = null;
-        this.detachEditorMouseHandlers();
+        // Destruye WaveSurfer y libera el object URL si el editor de frases estaba abierto.
+        this._teardownPhraseEditor?.();
         document.getElementById('modal').classList.add('hidden');
     },
 };

@@ -23,3 +23,5 @@ backups/
 # Se regenera solo al hacer `supabase link` — no debería ir al repo.
 supabase/.temp/
 
+# Local Pi runtime state
+.atl/

@@ -1496,6 +1496,7 @@ export const controllersMixin = {
         ];
         const randomArtist = artists[Math.floor(Math.random() * artists.length)];
         document.getElementById('artist-recommendation').textContent = randomArtist;
+        this.artistsManager?.renderDashboardCard();
     },
 
     // ===== PROGRESS SECTION =====

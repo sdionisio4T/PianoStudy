@@ -25,18 +25,13 @@ export function initState(app) {
         app.selectedLicks = new Set();
         app.currentRecordingDuration = null;
 
-        // Phrase editor (pro)
-        app.editorAudio = null;
-        app.editorIsPlaying = false;
+        // Phrase editor (WaveSurfer.js)
+        app.editorWavesurfer = null;
+        app.editorRegions = null;
+        app.editorRegion = null;
         app.editorLoop = true;
-        app.editorZoom = 1;
-        app.editorViewStart = 0;
-        app.editorDecodedBuffer = null;
-        app.editorPeaks = null;
-        app.editorDecodedSourceBlob = null;
-        app.editorPlayheadRaf = null;
-        app.editorDragging = null; // 'region' | 'start' | 'end' | 'playhead'
-        app.editorLastMouseX = 0;
+        app.editorPlayingRegion = false;
+        app.selectedPhrases = [];
 
         app.currentUser = null;
         app.licks = [];
@@ -66,9 +61,9 @@ export function initState(app) {
         app.currentAnalysis = null;
         app.analysisHistory = [];
         app.currentAnalysisAudioBlob = null;
-        app.analysisAudioUrl = null;
-        app.analysisSegmentTimer = null;
         app.analysisChat = [];
+        app.analysisWavesurfer = null;
+        app.analysisRegionsPlugin = null;
 
         // Progress tracking
         app.progressTracker = app.createProgressTracker();

@@ -33,9 +33,10 @@
 
     <!-- YouTube IFrame API -->
     <script defer src="https://www.youtube.com/iframe_api"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/essentia.js/dist/essentia-wasm.umd.js"></script>
-    <script defer src="https://unpkg.com/essentia.js/dist/essentia.js-core.umd.js"></script>
-    <script defer src="https://unpkg.com/@spotify/basic-pitch/dist/basic-pitch.js"></script>
+    <!-- Essentia.js: usar los builds .web.js / .js (browser-friendly UMD que expone window.EssentiaWASM / window.Essentia). Los .umd.js son builds para Node y tiran "exports is not defined" al cargarse por <script>. Versiones pinneadas para evitar romperse cuando el CDN sirva "latest". -->
+    <script defer src="https://cdn.jsdelivr.net/npm/essentia.js@0.1.3/dist/essentia-wasm.web.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/essentia.js@0.1.3/dist/essentia.js-core.js"></script>
+    <!-- basic-pitch + tf.js NO se cargan por CDN — @spotify/basic-pitch no tiene un bundle browser-friendly (dist/basic-pitch.js siempre fue 404). Ahora vienen bundleados vía Vite y se cargan con import dinámico desde AudioAnalyzer.transcribeToMidi. -->
 
     <!-- JSZip para el export de datos (RGPD) — cargado por CDN, no vía bundler -->
     <script defer src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
@@ -468,6 +469,59 @@
                         <select id="analysis-recording-select" class="recording-select">
                             <option value="">Selecciona una grabación...</option>
                         </select>
+
+                        <!-- Contexto opcional que se pasa al prompt de la IA.
+                             Sin esto el modelo tiene que adivinar género/nivel
+                             desde features acústicas — con esto responde específico. -->
+                        <div class="analysis-context">
+                            <div class="analysis-context__row">
+                                <label class="analysis-context__field">
+                                    <span>Estilo (opcional)</span>
+                                    <select id="analysis-style" class="recording-select">
+                                        <option value="">Sin declarar (la IA infiere)</option>
+                                        <option value="bebop">Bebop</option>
+                                        <option value="hardbop">Hard bop</option>
+                                        <option value="latinjazz">Latin jazz</option>
+                                        <option value="soncubano">Son cubano</option>
+                                        <option value="bolero">Bolero</option>
+                                        <option value="jazzcolombiano">Jazz colombiano</option>
+                                        <option value="blues">Blues</option>
+                                    </select>
+                                </label>
+                                <label class="analysis-context__field">
+                                    <span>Nivel (opcional)</span>
+                                    <select id="analysis-level" class="recording-select">
+                                        <option value="">La IA lo infiere</option>
+                                        <option value="principiante">Principiante</option>
+                                        <option value="intermedio">Intermedio</option>
+                                        <option value="avanzado">Avanzado</option>
+                                        <option value="profesional">Profesional</option>
+                                    </select>
+                                </label>
+                                <label class="analysis-context__field">
+                                    <span>Tempo objetivo (opcional)</span>
+                                    <input id="analysis-target-tempo" type="number" min="30" max="320" step="1" placeholder="BPM" class="recording-select" />
+                                </label>
+                            </div>
+                            <label class="analysis-context__field analysis-context__field--full">
+                                <span>Objetivo de esta práctica (opcional)</span>
+                                <input id="analysis-objective" type="text" maxlength="140" placeholder="ej: mejorar el ii-V-I sobre Autumn Leaves" class="recording-select" />
+                            </label>
+                            <label class="analysis-context__field analysis-context__field--full">
+                                <span>Notas para la IA (opcional)</span>
+                                <textarea id="analysis-notes" maxlength="500" rows="2" placeholder="ej: estoy trabajando la mano izquierda, ignorá la afinación del piano digital" class="recording-select"></textarea>
+                            </label>
+                        </div>
+
+                        <label class="analysis-toggle" for="analysis-gemini-toggle" title="Cuando está apagado, el análisis usa solo el pipeline local (Essentia + Basic Pitch + Groq), sin enviar audio a Gemini.">
+                            <input type="checkbox" id="analysis-gemini-toggle" checked />
+                            <span class="analysis-toggle__label">
+                                <i class="fas fa-headphones"></i>
+                                Escucha profunda (Gemini)
+                            </span>
+                            <span class="analysis-toggle__hint">testing A/B — apagalo para comparar el feedback sin la segunda capa auditiva</span>
+                        </label>
+
                         <button id="start-analysis-btn" class="btn-primary" disabled>
                             <i class="fas fa-brain"></i> Analizar Grabación
                         </button>
@@ -484,6 +538,11 @@
 
                     <!-- Resultados del análisis -->
                     <div id="analysis-results" class="analysis-results hidden">
+                        <div id="analysis-source-badge" class="analysis-source-badge"></div>
+                        <details id="analysis-engines-details" class="analysis-engines-details">
+                            <summary></summary>
+                            <div class="engines-panel-body"></div>
+                        </details>
                         <div class="analysis-section">
                             <h3><i class="fas fa-chart-line"></i> Resumen General</h3>
                             <div class="summary-cards">
@@ -523,6 +582,12 @@
                             <div class="analysis-content" id="musical-analysis"></div>
                         </div>
 
+                        <div class="analysis-section analysis-observations-section hidden" id="analysis-observations-section">
+                            <h3><i class="fas fa-layer-group"></i> Observaciones estructuradas</h3>
+                            <p class="analysis-observations-hint">Cada observación va en tres niveles: qué muestran los datos, qué sugieren musicalmente y qué podés experimentar para verificarlo.</p>
+                            <div id="analysis-observations-list" class="analysis-observations-list"></div>
+                        </div>
+
                         <div class="analysis-section technical-metrics-section">
                             <h3><i class="fas fa-sliders-h"></i> Métricas detectadas</h3>
                             <div class="technical-metrics-grid">
@@ -552,43 +617,33 @@
                             </div>
                         </div>
 
-                        <div class="analysis-section positive-section">
-                            <h3><i class="fas fa-thumbs-up"></i> Aspectos Positivos</h3>
-                            <div class="feedback-list" id="positive-feedback"></div>
-                        </div>
-
-                        <div class="analysis-section improvement-section">
-                            <h3><i class="fas fa-bullseye"></i> Áreas de Mejora</h3>
-                            <div class="feedback-list" id="improvement-feedback"></div>
-                        </div>
-
                         <div class="analysis-section">
-                            <h3><i class="fas fa-lightbulb"></i> Sugerencias de Práctica</h3>
+                            <h3><i class="fas fa-lightbulb"></i> Ejercicio de esta semana</h3>
                             <div class="practice-suggestions" id="practice-suggestions"></div>
                         </div>
 
+                        <div class="analysis-section analysis-next-goal hidden" id="analysis-next-goal-section">
+                            <h3><i class="fas fa-flag-checkered"></i> Objetivo próxima sesión</h3>
+                            <p class="analysis-next-goal__text" id="analysis-next-goal-text"></p>
+                        </div>
+
                         <div class="analysis-section">
-                            <h3><i class="fas fa-waveform-path"></i> Análisis Temporal</h3>
-                            <div class="analysis-audio-player">
-                                <audio id="analysis-audio" controls></audio>
-                                <div class="segment-controls">
-                                    <div class="segment-row">
-                                        <label for="segment-start">Inicio (s)</label>
-                                        <input id="segment-start" type="number" min="0" step="0.1" value="0">
-                                    </div>
-                                    <div class="segment-row">
-                                        <label for="segment-end">Fin (s)</label>
-                                        <input id="segment-end" type="number" min="0" step="0.1" value="0">
-                                    </div>
-                                    <button id="play-segment-audio-btn" class="btn-small">
-                                        <i class="fas fa-play"></i> Reproducir segmento
-                                    </button>
-                                </div>
+                            <h3><i class="fas fa-waveform-path"></i> Reproductor con marcas</h3>
+                            <p class="analysis-hint">Cada región marca un momento que identificó la IA. Verde = bien; naranja = a mejorar; gris = neutral. Click en una región para saltar ahí.</p>
+                            <div id="analysis-wavesurfer" class="analysis-wavesurfer"></div>
+                            <div id="analysis-wavesurfer-timeline" class="analysis-wavesurfer-timeline"></div>
+                            <div class="analysis-transport">
+                                <button id="analysis-play-btn" class="btn-secondary">
+                                    <i class="fas fa-play"></i>
+                                    <span data-role="analysis-play-label">Play</span>
+                                </button>
+                                <span id="analysis-time-label" class="analysis-time-label">0:00.00 / 0:00.00</span>
+                                <span id="analysis-moment-note" class="analysis-moment-note"></span>
                             </div>
-                            <canvas id="analysis-waveform" class="analysis-waveform" width="900" height="200"></canvas>
                             <div class="waveform-legend">
-                                <span class="legend-item"><span class="legend-color good"></span> Secciones bien ejecutadas</span>
-                                <span class="legend-item"><span class="legend-color improve"></span> Secciones a mejorar</span>
+                                <span class="legend-item"><span class="legend-color good"></span> Bien</span>
+                                <span class="legend-item"><span class="legend-color improve"></span> A mejorar</span>
+                                <span class="legend-item"><span class="legend-color neutral"></span> Neutral</span>
                             </div>
                         </div>
 

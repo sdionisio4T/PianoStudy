@@ -179,6 +179,29 @@ export async function deleteCustomArtist(artistId) {
     return { error };
 }
 
+// ── Catálogo editorial de artistas ─────────────────────────────────────────
+// La tabla se crea con 0010_artist_catalog.sql. El cliente recibe solo la
+// página solicitada; nunca descarga todo el catálogo para filtrar localmente.
+export async function loadArtistCatalogPage({ page = 1, pageSize = 12, style = 'all', search = '' } = {}) {
+    const safePage = Math.max(1, Number(page) || 1);
+    const safeSize = Math.min(24, Math.max(1, Number(pageSize) || 12));
+    const from = (safePage - 1) * safeSize;
+    const to = from + safeSize - 1;
+
+    let query = db
+        .from('artists')
+        .select('id,name,primary_style,description,photo_url,artist_releases(title,release_year,listening_url,is_entry_point,sort_order),artist_study_guides(study_focus,weekly_mission,listening_title,listening_url)', { count: 'exact' })
+        .eq('is_published', true)
+        .order('name', { ascending: true })
+        .range(from, to);
+
+    if (style && style !== 'all') query = query.eq('primary_style', style);
+    if (String(search).trim()) query = query.ilike('name', `%${String(search).trim()}%`);
+
+    const { data, error, count } = await query;
+    return { data: data || [], count: count || 0, error };
+}
+
 // ── Favorite Songs ────────────────────────────────────────────────────────────
 
 export async function loadFavoriteSongs() {

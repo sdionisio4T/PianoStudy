@@ -3,12 +3,23 @@
 
 import { escapeHtml, sanitizeFileName } from '../utils/sanitizers.js';
 import { AIAnalysisEngine } from '../modules/AIAnalysisEngine.js';
+import { deriveFeatures } from '../modules/AudioFeatures.js';
+import { selectSegments } from '../modules/AudioSegmentSelector.js';
+import { clipSegments } from '../modules/GeminiAudioClipper.js';
+import { analyzeAudioClips } from '../modules/GeminiAudioAnalyzer.js';
+import { GEMINI_AUDIO_CONFIG } from '../modules/GeminiAudioConfig.js';
+import { assessAnalysis } from '../modules/AnalysisReliability.js';
 import {
     insertLick, updateLick, uploadLickAudio,
     loadRecordingsFromDB, uploadRecording, getRecordingPublicUrl, deleteRecording,
     ERR_MSG
 } from '../modules/SupabaseDataManager.js';
 import { db } from '../modules/supabase-client.js';
+import WaveSurfer from 'wavesurfer.js';
+import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
+import TimelinePlugin from 'wavesurfer.js/dist/plugins/timeline.esm.js';
+import ZoomPlugin from 'wavesurfer.js/dist/plugins/zoom.esm.js';
+import HoverPlugin from 'wavesurfer.js/dist/plugins/hover.esm.js';
 
 export const audioFlowMixin = {
     initializeAIEngine() {
@@ -32,6 +43,195 @@ export const audioFlowMixin = {
     async showAnalysisSection() {
         this.showSection('ai-analysis');
         this.loadRecordingsForAnalysis();
+        this._initGeminiToggle();
+    },
+
+    // Toggle "Escucha profunda (Gemini)". Persistido por usuario. Default ON
+    // — el pipeline híbrido corre igual que hoy salvo que el usuario lo apague
+    // explícitamente para comparar A vs B (Fase 14 del plan).
+    _initGeminiToggle() {
+        const toggle = document.getElementById('analysis-gemini-toggle');
+        if (!toggle) return;
+        const key = this.userKey('pianostudy-gemini-audio-enabled');
+        const stored = this.safeGetLocalStorage(key, true);
+        toggle.checked = stored !== false;
+        if (!toggle._geminiWired) {
+            toggle._geminiWired = true;
+            toggle.addEventListener('change', () => {
+                this.safeSetLocalStorage(
+                    this.userKey('pianostudy-gemini-audio-enabled'),
+                    !!toggle.checked,
+                );
+            });
+        }
+    },
+
+    _isGeminiAudioEnabled() {
+        const toggle = document.getElementById('analysis-gemini-toggle');
+        if (toggle) return !!toggle.checked;
+        const stored = this.safeGetLocalStorage(
+            this.userKey('pianostudy-gemini-audio-enabled'), true,
+        );
+        return stored !== false;
+    },
+
+    // Render de la sección "Observaciones estructuradas" — un card por cada
+    // observación del LLM, con las tres capas explícitas (dato/interpretación/
+    // recomendación). Refuerza visualmente la REGLA 7 del prompt: el pianista
+    // ve que la recomendación pasó por una interpretación tentativa, no un
+    // diagnóstico directo desde un número.
+    _renderLayeredObservations(observations) {
+        const section = document.getElementById('analysis-observations-section');
+        const list = document.getElementById('analysis-observations-list');
+        if (!section || !list) return;
+
+        const items = Array.isArray(observations) ? observations : [];
+        if (!items.length) {
+            section.classList.add('hidden');
+            list.innerHTML = '';
+            return;
+        }
+
+        const confidenceLabel = { high: 'alta', medium: 'media', low: 'baja' };
+        list.innerHTML = items.map((o) => {
+            const conf = ['high', 'medium', 'low'].includes(o.confidence) ? o.confidence : 'medium';
+            return `
+                <article class="layered-obs layered-obs--${conf}">
+                    <header class="layered-obs__header">
+                        <span class="layered-obs__confidence">confianza: ${confidenceLabel[conf]}</span>
+                    </header>
+                    <div class="layered-obs__row layered-obs__row--fact">
+                        <span class="layered-obs__tag">Dato</span>
+                        <p class="layered-obs__text">${escapeHtml(String(o.fact || ''))}</p>
+                    </div>
+                    <div class="layered-obs__row layered-obs__row--interp">
+                        <span class="layered-obs__tag">Interpretación</span>
+                        <p class="layered-obs__text">${escapeHtml(String(o.interpretation || ''))}</p>
+                    </div>
+                    <div class="layered-obs__row layered-obs__row--rec">
+                        <span class="layered-obs__tag">Recomendación</span>
+                        <p class="layered-obs__text">${escapeHtml(String(o.recommendation || ''))}</p>
+                    </div>
+                </article>
+            `;
+        }).join('');
+        section.classList.remove('hidden');
+    },
+
+    // Panel "IAs y motores usados" — colapsable, plegado por defecto (per user
+    // request), con conteo visible en el summary. Se renderiza a partir de
+    // los datos que ya guardamos en currentAnalysis (providersUsed/Failed,
+    // aiAnalysis.source, auditoryLayer.usage, reliability).
+    _renderEnginesPanel() {
+        const panel = document.getElementById('analysis-engines-details');
+        if (!panel || !this.currentAnalysis) return;
+        const { audioAnalysis = {}, aiAnalysis = {}, auditoryLayer, reliability, geminiRequested } = this.currentAnalysis;
+
+        const providersUsed = Array.isArray(audioAnalysis.providersUsed) ? audioAnalysis.providersUsed : [];
+        const providersFailed = Array.isArray(audioAnalysis.providersFailed) ? audioAnalysis.providersFailed : [];
+        const source = String(aiAnalysis.source || '');
+        const midiCount = Array.isArray(audioAnalysis.midiNotes) ? audioAnalysis.midiNotes.length : 0;
+
+        // Motor de análisis local — Essentia por subalgoritmo + Basic Pitch.
+        const essentiaOk = providersUsed.includes('essentia-init')
+            && ['tempo', 'key', 'loudness'].every(x => providersUsed.includes(x));
+        const essentiaPartial = providersUsed.includes('essentia-init') && !essentiaOk;
+        let essentiaLabel;
+        if (essentiaOk) essentiaLabel = { icon: '✓', cls: 'ok', text: 'Essentia (tempo, tonalidad, dinámica)' };
+        else if (essentiaPartial) essentiaLabel = { icon: '⚠', cls: 'warn', text: 'Essentia (parcial, algún subalgoritmo falló)' };
+        else essentiaLabel = { icon: '✗', cls: 'fail', text: 'Essentia no disponible — se usó fallback casero' };
+
+        const basicPitchUsed = providersUsed.some(p => String(p).startsWith('basic-pitch'));
+        const basicPitchFailed = providersFailed.some(p => String(p).includes('basic-pitch'));
+        let basicPitchLabel;
+        if (basicPitchUsed) basicPitchLabel = { icon: '✓', cls: 'ok', text: `Basic Pitch (${midiCount} notas transcritas)` };
+        else if (basicPitchFailed) basicPitchLabel = { icon: '✗', cls: 'fail', text: 'Basic Pitch no devolvió notas' };
+        else basicPitchLabel = { icon: '—', cls: 'warn', text: 'Basic Pitch no se ejecutó' };
+
+        // LLM que sintetizó el feedback — se deriva del source del aiAnalysis.
+        const llmMap = {
+            'ai-groq':         { name: 'Groq', model: 'llama-3.3-70b-versatile', cls: 'ok' },
+            'ai-groq+audio':   { name: 'Groq', model: 'llama-3.3-70b-versatile', cls: 'ok' },
+            'ai-gemini':       { name: 'Gemini', model: 'gemini-1.5-flash', cls: 'ok' },
+            'ai-gemini+audio': { name: 'Gemini', model: 'gemini-1.5-flash', cls: 'ok' },
+            'fallback-parse-error':    { name: 'Fallback', model: 'JSON inválido del LLM', cls: 'fail' },
+            'fallback-schema-invalid': { name: 'Fallback', model: 'schema inválido del LLM', cls: 'fail' },
+            'fallback-network':        { name: 'Fallback', model: 'ningún LLM respondió', cls: 'fail' },
+        };
+        const llm = llmMap[source] || { name: 'Desconocido', model: source, cls: 'warn' };
+        const llmIcon = llm.cls === 'ok' ? '✓' : (llm.cls === 'warn' ? '⚠' : '✗');
+
+        // Escucha profunda con Gemini — 4 estados posibles: apagado por toggle,
+        // deshabilitado por config, corrió OK, corrió y falló.
+        let audioLabel;
+        if (!geminiRequested) {
+            audioLabel = { icon: '—', cls: 'off', text: 'Escucha profunda apagada (toggle OFF)' };
+        } else if (!GEMINI_AUDIO_CONFIG.enabled) {
+            audioLabel = { icon: '—', cls: 'off', text: 'Escucha profunda deshabilitada por configuración' };
+        } else if (auditoryLayer?.usage) {
+            const u = auditoryLayer.usage;
+            audioLabel = {
+                icon: '✓', cls: 'ok',
+                text: `Gemini ${GEMINI_AUDIO_CONFIG.modelName} — ${u.segments_sent} clip(s), ${u.audio_seconds_sent}s enviados`,
+            };
+        } else {
+            audioLabel = { icon: '✗', cls: 'fail', text: 'Escucha profunda no disponible en este análisis' };
+        }
+
+        // Confiabilidad por señal.
+        const relRows = [];
+        if (reliability?.tempo) {
+            const t = reliability.tempo;
+            const val = t.value ? `${t.value} BPM` : '—';
+            relRows.push(`<li class="engines-rel engines-rel--${t.reliability}"><span class="engines-rel__label">tempo</span> <span class="engines-rel__tier">${t.reliability}</span> <span class="engines-rel__detail">${escapeHtml(val)} · conf ${t.confidence}</span></li>`);
+        }
+        if (reliability?.key) {
+            const k = reliability.key;
+            const val = k.value ? `${k.value}${k.mode ? ' ' + k.mode : ''}` : 'no determinada';
+            relRows.push(`<li class="engines-rel engines-rel--${k.reliability}"><span class="engines-rel__label">tonalidad</span> <span class="engines-rel__tier">${k.reliability}</span> <span class="engines-rel__detail">${escapeHtml(val)} · conf ${k.confidence}</span></li>`);
+        }
+        if (reliability?.transcription) {
+            const tr = reliability.transcription;
+            relRows.push(`<li class="engines-rel engines-rel--${tr.level}"><span class="engines-rel__label">transcripción</span> <span class="engines-rel__tier">${tr.level}</span> <span class="engines-rel__detail">score ${tr.score}${tr.available ? '' : ' · no disponible'}</span></li>`);
+        }
+
+        // Conteo para el summary.
+        const chips = [essentiaLabel, basicPitchLabel, { icon: llmIcon, cls: llm.cls }, audioLabel];
+        const okCount = chips.filter(c => c.cls === 'ok').length;
+        const warnCount = chips.filter(c => c.cls === 'warn' || c.cls === 'off').length;
+        const failCount = chips.filter(c => c.cls === 'fail').length;
+        const quality = reliability?.overall_data_quality || null;
+
+        const summary = `
+            <span class="engines-summary__title"><i class="fas fa-microchip"></i> IAs y motores usados</span>
+            <span class="engines-summary__counts">
+                ${okCount ? `<span class="engines-count engines-count--ok">${okCount} ✓</span>` : ''}
+                ${warnCount ? `<span class="engines-count engines-count--warn">${warnCount} ⚠</span>` : ''}
+                ${failCount ? `<span class="engines-count engines-count--fail">${failCount} ✗</span>` : ''}
+                ${quality ? `<span class="engines-count engines-count--quality engines-count--quality-${quality}">calidad: ${quality}</span>` : ''}
+            </span>
+        `;
+
+        const body = `
+            <ul class="engines-list">
+                <li class="engines-line"><span class="engines-line__label">Análisis local</span>
+                    <span class="engines-chip engines-chip--${essentiaLabel.cls}">${essentiaLabel.icon} ${escapeHtml(essentiaLabel.text)}</span>
+                    <span class="engines-chip engines-chip--${basicPitchLabel.cls}">${basicPitchLabel.icon} ${escapeHtml(basicPitchLabel.text)}</span>
+                </li>
+                <li class="engines-line"><span class="engines-line__label">LLM (síntesis del feedback)</span>
+                    <span class="engines-chip engines-chip--${llm.cls}">${llmIcon} ${escapeHtml(llm.name)}${llm.model ? ' — ' + escapeHtml(llm.model) : ''}</span>
+                </li>
+                <li class="engines-line"><span class="engines-line__label">Escucha profunda (Gemini)</span>
+                    <span class="engines-chip engines-chip--${audioLabel.cls}">${audioLabel.icon} ${escapeHtml(audioLabel.text)}</span>
+                </li>
+                ${relRows.length ? `<li class="engines-line engines-line--rel"><span class="engines-line__label">Confiabilidad por señal</span><ul class="engines-rel-list">${relRows.join('')}</ul></li>` : ''}
+            </ul>
+        `;
+
+        const summaryEl = panel.querySelector('summary');
+        const bodyEl = panel.querySelector('.engines-panel-body');
+        if (summaryEl) summaryEl.innerHTML = summary;
+        if (bodyEl) bodyEl.innerHTML = body;
     },
 
     loadRecordingsForAnalysis() {
@@ -86,18 +286,73 @@ export const audioFlowMixin = {
             this.updateAnalysisProgress(15);
             await this.audioAnalyzer.init();
             const audioAnalysis = await this.audioAnalyzer.analyzeAudio(audioBlob, { enableMidiTranscription: true });
-            this.updateAnalysisProgress(55);
+            this.updateAnalysisProgress(40);
+
+            // Contexto declarado por el usuario en la UI de análisis. Todos opcionales;
+            // los que no llenó, se omiten del prompt (la IA infiere). Nota: metadata.style
+            // dispara STYLE_GUIDANCE si coincide con una key soportada.
+            const targetTempoRaw = document.getElementById('analysis-target-tempo')?.value;
+            const parsedTargetTempo = Number(targetTempoRaw);
+            const metadata = {
+                style: (document.getElementById('analysis-style')?.value || '').trim(),
+                level: (document.getElementById('analysis-level')?.value || '').trim(),
+                objective: (document.getElementById('analysis-objective')?.value || '').trim(),
+                targetTempo: Number.isFinite(parsedTargetTempo) && parsedTargetTempo > 0
+                    ? parsedTargetTempo
+                    : null,
+                notes: (document.getElementById('analysis-notes')?.value || '').trim(),
+            };
+
+            // ─── Capa de confiabilidad ──────────────────────────────────────
+            // Evalúa qué señales del análisis son afirmables antes de llegar
+            // al LLM. NO corrige datos; los envuelve con tiers. El prompt
+            // (REGLA 6 del systemPrompt) lee este bloque y ajusta qué puede
+            // afirmar. Ver assets/js/modules/AnalysisReliability.js.
+            const reliability = assessAnalysis(audioAnalysis);
+            console.info('[reliability]', reliability);
+
+            // ─── Escucha profunda con Gemini (Fase 4 del plan hybrid) ────────
+            // Segunda capa auditiva OPCIONAL. Falla en silencio: si algo se
+            // rompe, seguimos con análisis local + Groq como siempre. Respeta
+            // el toggle "Escucha profunda (Gemini)" (default ON).
+            let auditoryLayer = null;
+            const geminiOn = this._isGeminiAudioEnabled();
+            if (GEMINI_AUDIO_CONFIG.enabled && geminiOn) {
+                try {
+                    const derived = deriveFeatures(audioAnalysis);
+                    const segments = selectSegments(audioAnalysis, derived);
+                    if (segments.length > 0) {
+                        const audioBuffer = await this.getAudioBuffer(audioBlob);
+                        const clips = await clipSegments(audioBuffer, segments);
+                        if (clips.length > 0) {
+                            auditoryLayer = await analyzeAudioClips(clips, metadata);
+                            if (auditoryLayer?.usage) {
+                                // Log técnico (Fase 12 — observabilidad, sin exponer al usuario).
+                                console.info('[gemini-audio] usage', auditoryLayer.usage);
+                            }
+                        }
+                    }
+                } catch (err) {
+                    console.warn('Escucha profunda (Gemini) falló, sigo sin ella:', err);
+                    auditoryLayer = null;
+                }
+            } else if (!geminiOn) {
+                console.info('[gemini-audio] deshabilitado por toggle del usuario');
+            }
+            this.updateAnalysisProgress(65);
 
             const aiEngine = this.aiEngine || new AIAnalysisEngine();
-            const aiAnalysis = await aiEngine.analyzePerformance(audioAnalysis, {});
-            this.updateAnalysisProgress(80);
+            // Memoria del estudiante: agregada desde el histórico local del usuario,
+            // sin llamadas extra a la IA. Le da al análisis nuevo continuidad con las
+            // sesiones previas — la IA sabe qué le venías comentando y qué ejercicios
+            // ya le recomendó, así no repite lo mismo cada vez.
+            const studentMemory = AIAnalysisEngine.buildStudentMemory(this.analysisHistory);
 
-            const canvas = document.getElementById('analysis-waveform');
-            if (canvas) {
-                const audioBuffer = await this.getAudioBuffer(audioBlob);
-                this.audioAnalyzer.generateAnnotatedWaveform(audioBuffer, canvas);
-            }
-
+            const aiAnalysis = await aiEngine.analyzePerformance(
+                audioAnalysis, metadata, studentMemory,
+                auditoryLayer?.observations || null,
+                reliability,
+            );
             this.updateAnalysisProgress(100);
 
             this.currentAnalysis = {
@@ -105,6 +360,9 @@ export const audioFlowMixin = {
                 recordingName: selection === 'current' ? 'Grabación actual' : `Grabación ${selection}`,
                 audioAnalysis,
                 aiAnalysis,
+                auditoryLayer,
+                reliability,
+                geminiRequested: geminiOn,
                 timestamp: Date.now()
             };
             this.currentAnalysisAudioBlob = audioBlob;
@@ -134,6 +392,34 @@ export const audioFlowMixin = {
         const { audioAnalysis, aiAnalysis } = this.currentAnalysis;
 
         document.getElementById('analysis-results')?.classList.remove('hidden');
+
+        const badgeEl = document.getElementById('analysis-source-badge');
+        if (badgeEl) {
+            const source = String(aiAnalysis?.source || '');
+            const badges = {
+                'ai-groq':          { cls: 'is-real', icon: 'fa-check-circle', text: 'Análisis con IA (Groq) — respuesta específica para tu grabación' },
+                'ai-gemini':        { cls: 'is-real', icon: 'fa-check-circle', text: 'Análisis con IA (Gemini) — respuesta específica para tu grabación' },
+                'ai-groq+audio':    { cls: 'is-real', icon: 'fa-check-circle', text: 'Análisis con IA (Groq) + escucha profunda con Gemini — respuesta específica para tu grabación' },
+                'ai-gemini+audio':  { cls: 'is-real', icon: 'fa-check-circle', text: 'Análisis con IA (Gemini) + escucha profunda — respuesta específica para tu grabación' },
+                'fallback-parse-error':    { cls: 'is-fallback', icon: 'fa-triangle-exclamation', text: 'Respuesta genérica — la IA respondió pero no fue JSON parseable. Volvé a intentar en un minuto.' },
+                'fallback-schema-invalid': { cls: 'is-fallback', icon: 'fa-triangle-exclamation', text: 'Respuesta genérica — la IA devolvió JSON con campos faltantes o inválidos. Volvé a intentar.' },
+                'fallback-network': { cls: 'is-fallback', icon: 'fa-triangle-exclamation', text: 'Respuesta genérica — la IA no respondió. Revisá tu conexión y volvé a intentar.' },
+            };
+            const b = badges[source] || badges['fallback-network'];
+            const used = Array.isArray(audioAnalysis?.providersUsed) ? audioAnalysis.providersUsed : [];
+            const failed = Array.isArray(audioAnalysis?.providersFailed) ? audioAnalysis.providersFailed : [];
+            const engineChip = (used.length || failed.length)
+                ? `<div class="analysis-engines">
+                        <span class="analysis-engines__label">Motores de análisis:</span>
+                        ${used.map(p => `<span class="analysis-engine-chip is-ok">✓ ${escapeHtml(p)}</span>`).join('')}
+                        ${failed.map(p => `<span class="analysis-engine-chip is-fail">✗ ${escapeHtml(p)}</span>`).join('')}
+                   </div>`
+                : '';
+            badgeEl.className = `analysis-source-badge ${b.cls}`;
+            badgeEl.innerHTML = `<div class="analysis-source-badge__row"><i class="fas ${b.icon}"></i> <span>${b.text}</span></div>${engineChip}`;
+        }
+
+        this._renderEnginesPanel();
 
         const tempoBpm = Number(audioAnalysis?.tempo?.bpm || audioAnalysis?.tempo || 0);
         const tempoConfidence = Number(audioAnalysis?.tempo?.confidence || 0);
@@ -186,75 +472,216 @@ export const audioFlowMixin = {
         }
 
         const musicalEl = document.getElementById('musical-analysis');
-        if (musicalEl) musicalEl.innerHTML = `<p>${escapeHtml(aiAnalysis.musicalAnalysis || '')}</p>`;
-
-        const posEl = document.getElementById('positive-feedback');
-        if (posEl) {
-            const arr = Array.isArray(aiAnalysis.positiveAspects) ? aiAnalysis.positiveAspects : [];
-            posEl.innerHTML = arr.map(aspect => `
-                <div class="feedback-item">
-                    <div class="feedback-icon">✅</div>
-                    <div class="feedback-text">${escapeHtml(aspect)}</div>
-                </div>
-            `).join('');
+        if (musicalEl) {
+            // Renderiza el análisis como párrafos separados por saltos de línea dobles.
+            // Si la IA se escapa y mete marcadores de lista (-, *, •, 1. 2.),
+            // los limpiamos y unimos las líneas como oraciones dentro del párrafo,
+            // así el tono coach en prosa se ve como prosa y no como un checklist.
+            const raw = String(aiAnalysis.musicalAnalysis || '').trim();
+            const paragraphs = raw
+                .split(/\n{2,}|\r{2,}/)
+                .map(block => {
+                    const lines = block
+                        .split(/\r?\n/)
+                        .map(l => l.replace(/^\s*(?:[-*•·▪●]|\d+[.)])\s+/, '').trim())
+                        .filter(Boolean);
+                    return lines.join(' ');
+                })
+                .filter(Boolean);
+            musicalEl.innerHTML = paragraphs.length
+                ? paragraphs.map(p => `<p>${escapeHtml(p)}</p>`).join('')
+                : '<p class="no-data">Sin análisis disponible.</p>';
         }
 
-        const impEl = document.getElementById('improvement-feedback');
-        if (impEl) {
-            const arr = Array.isArray(aiAnalysis.areasToImprove) ? aiAnalysis.areasToImprove : [];
-            impEl.innerHTML = arr.map(area => `
-                <div class="feedback-item improvement">
-                    <div class="feedback-icon">💡</div>
-                    <div class="feedback-text">${escapeHtml(area)}</div>
-                </div>
-            `).join('');
-        }
+        // Observaciones en tres niveles (REGLA 7 del prompt): fact → interpretation
+        // → recommendation. Sección visible solo si el LLM devolvió al menos una;
+        // si no pudo articular ninguna con las tres capas honestas, no aparece
+        // (mejor no mostrar que forzar prosa vacía).
+        this._renderLayeredObservations(aiAnalysis?.observations || []);
 
         const sugEl = document.getElementById('practice-suggestions');
         if (sugEl) {
-            const arr = Array.isArray(aiAnalysis.practiceSuggestions) ? aiAnalysis.practiceSuggestions : [];
-            sugEl.innerHTML = arr.map(s => `
+            // Nuevo schema: practiceExercise (uno solo). Compat: practiceSuggestions (array).
+            const single = aiAnalysis?.practiceExercise;
+            const arr = single && typeof single === 'object'
+                ? [single]
+                : (Array.isArray(aiAnalysis?.practiceSuggestions) ? aiAnalysis.practiceSuggestions : []);
+            const clean = (text) => String(text || '')
+                .split(/\r?\n/)
+                .map(l => l.replace(/^\s*(?:[-*•·▪●]|\d+[.)])\s+/, '').trim())
+                .filter(Boolean)
+                .join(' ');
+            sugEl.innerHTML = arr.map(s => {
+                const dur = Number(s?.durationMin);
+                const durationBadge = Number.isFinite(dur) && dur > 0
+                    ? `<span class="suggestion-duration"><i class="fas fa-clock"></i> ${Math.round(dur)} min</span>`
+                    : '';
+                return `
                 <div class="suggestion-card">
                     <div class="suggestion-title">
                         <i class="fas fa-star"></i>
-                        ${escapeHtml(s.title || '')}
+                        ${escapeHtml(s?.title || '')}
+                        ${durationBadge}
                     </div>
                     <div class="suggestion-description">
-                        ${escapeHtml(s.description || '')}
+                        ${escapeHtml(clean(s?.description))}
                     </div>
                 </div>
-            `).join('');
+                `;
+            }).join('') || '<p class="no-data">Sin ejercicio recomendado.</p>';
         }
 
-        // Audio player
-        const audioEl = document.getElementById('analysis-audio');
-        if (audioEl) {
-            if (this.analysisAudioUrl) {
-                this.cleanupObjectURL(this.analysisAudioUrl);
-                this.analysisAudioUrl = null;
-            }
-
-            if (this.currentAnalysisAudioBlob instanceof Blob) {
-                const url = this.createTrackedObjectURL(this.currentAnalysisAudioBlob);
-                this.analysisAudioUrl = url;
-                audioEl.src = url;
-                audioEl.setAttribute('data-object-url', url);
+        // Objetivo próxima sesión — se muestra solo si vino del modelo. Se conecta
+        // con la memoria del estudiante en el próximo análisis (el modelo verá
+        // los ejercicios previos y puede chequear si el objetivo se cumplió).
+        const nextGoalSection = document.getElementById('analysis-next-goal-section');
+        const nextGoalText = document.getElementById('analysis-next-goal-text');
+        const goal = String(aiAnalysis?.nextGoal || '').trim();
+        if (nextGoalSection && nextGoalText) {
+            if (goal) {
+                nextGoalText.textContent = goal;
+                nextGoalSection.classList.remove('hidden');
             } else {
-                audioEl.removeAttribute('src');
-                audioEl.load();
+                nextGoalSection.classList.add('hidden');
+                nextGoalText.textContent = '';
             }
         }
 
-        const startEl = document.getElementById('segment-start');
-        const endEl = document.getElementById('segment-end');
-        if (startEl && endEl) {
-            startEl.value = '0';
-            endEl.value = String(Math.max(0, Number(audioAnalysis.duration?.toFixed?.(1) || 0)));
-        }
+        // Reproductor WaveSurfer con regiones para los momentos que marcó la IA.
+        this._initAnalysisWavesurfer();
 
         // Reset chat
         this.analysisChat = [];
         this.renderAnalysisChat();
+    },
+
+    _initAnalysisWavesurfer() {
+        this._teardownAnalysisWavesurfer();
+
+        const container = document.getElementById('analysis-wavesurfer');
+        if (!container || !(this.currentAnalysisAudioBlob instanceof Blob)) return;
+
+        const rootStyles = getComputedStyle(document.documentElement);
+        const accent = rootStyles.getPropertyValue('--accent-green').trim() || '#00ff41';
+        const textPrimary = rootStyles.getPropertyValue('--text-primary').trim() || '#ffffff';
+        const textSecondary = rootStyles.getPropertyValue('--text-secondary').trim() || '#aaaaaa';
+
+        const ws = WaveSurfer.create({
+            container,
+            waveColor: 'rgba(59, 168, 105, 0.55)',
+            progressColor: accent,
+            cursorColor: textPrimary,
+            cursorWidth: 2,
+            height: 140,
+            barWidth: 2,
+            barGap: 1,
+            barRadius: 2,
+            normalize: true,
+            plugins: [
+                TimelinePlugin.create({
+                    container: '#analysis-wavesurfer-timeline',
+                    height: 22,
+                    insertPosition: 'beforebegin',
+                    style: { color: textSecondary, fontSize: '11px' },
+                }),
+                HoverPlugin.create({
+                    lineColor: textPrimary,
+                    lineWidth: 1,
+                    labelBackground: 'rgba(0, 0, 0, 0.75)',
+                    labelColor: '#ffffff',
+                    labelSize: '11px',
+                }),
+            ],
+        });
+
+        const regionsPlugin = ws.registerPlugin(RegionsPlugin.create());
+        this.analysisWavesurfer = ws;
+        this.analysisRegionsPlugin = regionsPlugin;
+
+        const noteEl = document.getElementById('analysis-moment-note');
+        const timeEl = document.getElementById('analysis-time-label');
+
+        const updateTime = () => {
+            if (!timeEl) return;
+            timeEl.textContent = `${this.formatDuration(ws.getCurrentTime())} / ${this.formatDuration(ws.getDuration())}`;
+        };
+        this._setAnalysisPlayLabel(false);
+        ws.on('play', () => this._setAnalysisPlayLabel(true));
+        ws.on('pause', () => this._setAnalysisPlayLabel(false));
+        ws.on('finish', () => this._setAnalysisPlayLabel(false));
+        ws.on('audioprocess', updateTime);
+        ws.on('seeking', updateTime);
+
+        ws.on('ready', () => {
+            updateTime();
+            const moments = Array.isArray(this.currentAnalysis?.aiAnalysis?.moments)
+                ? this.currentAnalysis.aiAnalysis.moments
+                : [];
+            const total = ws.getDuration();
+            const palette = {
+                good:    'rgba(0, 200, 100, 0.28)',
+                improve: 'rgba(255, 160, 0, 0.28)',
+                neutral: 'rgba(160, 160, 160, 0.22)',
+            };
+            for (const m of moments) {
+                const start = Math.max(0, Math.min(total, Number(m?.timeStart) || 0));
+                const end = Math.max(start + 0.1, Math.min(total, Number(m?.timeEnd) || start + 1));
+                const kind = ['good', 'improve', 'neutral'].includes(m?.kind) ? m.kind : 'neutral';
+                const color = palette[kind];
+                const region = regionsPlugin.addRegion({
+                    start,
+                    end,
+                    color,
+                    drag: false,
+                    resize: false,
+                    content: String(m?.note || '').slice(0, 80),
+                });
+                region.on('click', () => {
+                    ws.setTime(start);
+                    if (noteEl) noteEl.textContent = String(m?.note || '');
+                });
+                region.on('over', () => {
+                    if (noteEl) noteEl.textContent = String(m?.note || '');
+                });
+            }
+        });
+
+        const playBtn = document.getElementById('analysis-play-btn');
+        if (playBtn && !playBtn._analysisWired) {
+            playBtn._analysisWired = true;
+            playBtn.addEventListener('click', () => {
+                if (this.analysisWavesurfer) this.analysisWavesurfer.playPause();
+            });
+        }
+
+        const loadPromise = typeof ws.loadBlob === 'function'
+            ? ws.loadBlob(this.currentAnalysisAudioBlob)
+            : ws.load(this.createTrackedObjectURL(this.currentAnalysisAudioBlob));
+        Promise.resolve(loadPromise).catch((e) => {
+            console.error('Analysis WaveSurfer load error:', e);
+            this.showNotification('No se pudo cargar el audio del análisis', 'error');
+        });
+    },
+
+    _teardownAnalysisWavesurfer() {
+        try {
+            this.analysisWavesurfer?.destroy();
+        } catch {
+            // Ignore destroy errors — the instance may already be gone.
+        }
+        this.analysisWavesurfer = null;
+        this.analysisRegionsPlugin = null;
+        const noteEl = document.getElementById('analysis-moment-note');
+        if (noteEl) noteEl.textContent = '';
+    },
+
+    _setAnalysisPlayLabel(isPlaying) {
+        const btn = document.getElementById('analysis-play-btn');
+        if (!btn) return;
+        const icon = btn.querySelector('i');
+        const label = btn.querySelector('[data-role="analysis-play-label"]');
+        if (icon) icon.className = isPlaying ? 'fas fa-pause' : 'fas fa-play';
+        if (label) label.textContent = isPlaying ? 'Pause' : 'Play';
     },
 
     saveAnalysis() {
@@ -360,11 +787,11 @@ export const audioFlowMixin = {
         if (btn) btn.disabled = true;
         this.currentAnalysis = null;
         this.currentAnalysisAudioBlob = null;
-
-        const audioEl = document.getElementById('analysis-audio');
-        if (audioEl) {
-            audioEl.removeAttribute('src');
-            audioEl.load();
+        this._teardownAnalysisWavesurfer();
+        const badgeEl = document.getElementById('analysis-source-badge');
+        if (badgeEl) {
+            badgeEl.className = 'analysis-source-badge';
+            badgeEl.innerHTML = '';
         }
     },
 
@@ -414,43 +841,15 @@ export const audioFlowMixin = {
 
         const { audioAnalysis, aiAnalysis } = this.currentAnalysis;
         const engine = this.aiEngine || new AIAnalysisEngine();
-        const answer = await engine.answerQuestion(audioAnalysis, aiAnalysis, question);
+        // Pasamos historial excluyendo la pregunta recién agregada (se pasa aparte).
+        const historyForModel = this.analysisChat.slice(0, -1);
+        const answer = await engine.answerQuestion(audioAnalysis, aiAnalysis, question, historyForModel);
         this.analysisChat.push({ role: 'assistant', text: String(answer || '') });
         this.renderAnalysisChat();
     },
 
-    playAnalysisSegment() {
-        const audioEl = document.getElementById('analysis-audio');
-        if (!audioEl || !audioEl.src) {
-            this.showNotification('No hay audio cargado', 'info');
-            return;
-        }
-
-        const start = Math.max(0, Number(document.getElementById('segment-start')?.value || 0));
-        const end = Math.max(0, Number(document.getElementById('segment-end')?.value || 0));
-        if (!(end > start)) {
-            this.showNotification('El fin debe ser mayor que el inicio', 'info');
-            return;
-        }
-
-        if (this.analysisSegmentTimer) {
-            clearInterval(this.analysisSegmentTimer);
-            this.analysisSegmentTimer = null;
-        }
-
-        audioEl.currentTime = start;
-        audioEl.play().catch(() => {
-            this.showNotification('No se pudo reproducir el audio', 'error');
-        });
-
-        this.analysisSegmentTimer = setInterval(() => {
-            if (audioEl.currentTime >= end || audioEl.ended) {
-                audioEl.pause();
-                clearInterval(this.analysisSegmentTimer);
-                this.analysisSegmentTimer = null;
-            }
-        }, 100);
-    },
+    // NOTA: playAnalysisSegment fue removido — el reproductor del análisis ahora
+    // es un WaveSurfer con regiones clicables (ver _initAnalysisWavesurfer).
 
     openAnalysisDb() {
         return new Promise((resolve, reject) => {
@@ -1112,31 +1511,50 @@ export const audioFlowMixin = {
     },
 
     openPhraseEditor() {
+        if (!this.currentRecording) {
+            this.showNotification('No hay grabación cargada para editar', 'info');
+            return;
+        }
+
+        this._teardownPhraseEditor();
+        this.selectedPhrases = this.selectedPhrases || [];
+
         const modalBody = document.getElementById('modal-body');
         modalBody.innerHTML = `
-            <h3>Editor de Frases Musicales</h3>
-            <div class="editor-container">
-                <div class="waveform-editor">
-                    <canvas id="editor-waveform" width="600" height="200"></canvas>
-                    <div class="timeline">
-                        <div class="time-marker">0:00</div>
-                        <div class="time-marker">0:30</div>
-                        <div class="time-marker">1:00</div>
-                    </div>
+            <div class="phrase-editor">
+                <h3 class="phrase-editor__title">Editor de frases</h3>
+                <div class="phrase-editor__hint">
+                    Arrastrá los bordes de la región para elegir el fragmento. La rueda del mouse hace zoom.
                 </div>
-                <div class="phrase-controls">
-                    <button class="btn-small" data-action="editor-play-selection">
-                        <i class="fas fa-play"></i> Reproducir selección
+                <div id="editor-waveform" class="phrase-editor__waveform"></div>
+                <div id="editor-timeline" class="phrase-editor__timeline"></div>
+                <div class="phrase-editor__transport">
+                    <button class="btn-secondary" data-action="editor-toggle-play">
+                        <i class="fas fa-play"></i>
+                        <span data-role="editor-play-label">Play</span>
                     </button>
+                    <button class="btn-secondary" data-action="editor-play-selection">
+                        <i class="fas fa-crosshairs"></i> Reproducir selección
+                    </button>
+                    <label class="phrase-editor__loop">
+                        <input type="checkbox" data-role="editor-loop-toggle" checked>
+                        Loop selección
+                    </label>
+                    <span class="phrase-editor__time" data-role="editor-time">0:00.00 / 0:00.00</span>
+                    <span class="phrase-editor__selection" data-role="editor-selection">Selección: —</span>
+                </div>
+                <div class="phrase-editor__add">
+                    <input type="text" id="editor-phrase-name-input"
+                        placeholder="Nombre (opcional — si lo dejás vacío se llama 'Frase N')" maxlength="60">
                     <button class="btn-primary" data-action="editor-add-phrase">
                         <i class="fas fa-plus"></i> Agregar frase
                     </button>
                 </div>
-                <div class="phrases-list">
-                    <h4>Frases seleccionadas:</h4>
+                <div class="phrase-editor__list">
+                    <h4>Frases seleccionadas</h4>
                     <div id="selected-phrases"></div>
                 </div>
-                <div class="editor-actions">
+                <div class="phrase-editor__footer">
                     <button class="btn-primary" data-action="editor-save-licks">
                         <i class="fas fa-save"></i> Guardar en Licks
                     </button>
@@ -1148,7 +1566,244 @@ export const audioFlowMixin = {
         `;
 
         document.getElementById('modal').classList.remove('hidden');
-        this.initPhraseEditor();
+        this.updatePhrasesList();
+
+        const loopToggle = modalBody.querySelector('[data-role="editor-loop-toggle"]');
+        if (loopToggle) {
+            this.editorLoop = loopToggle.checked;
+            loopToggle.addEventListener('change', (e) => {
+                this.editorLoop = e.target.checked;
+            });
+        }
+
+        const nameInput = modalBody.querySelector('#editor-phrase-name-input');
+        if (nameInput) {
+            nameInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    this.addPhrase();
+                }
+            });
+        }
+
+        this._initEditorWavesurfer();
+    },
+
+    _initEditorWavesurfer() {
+        const container = document.getElementById('editor-waveform');
+        if (!container) return;
+
+        const rootStyles = getComputedStyle(document.documentElement);
+        const accent = rootStyles.getPropertyValue('--accent-green').trim() || '#00ff41';
+        const textPrimary = rootStyles.getPropertyValue('--text-primary').trim() || '#ffffff';
+        const textSecondary = rootStyles.getPropertyValue('--text-secondary').trim() || '#aaaaaa';
+
+        const ws = WaveSurfer.create({
+            container,
+            waveColor: 'rgba(59, 168, 105, 0.55)',
+            progressColor: accent,
+            cursorColor: textPrimary,
+            cursorWidth: 2,
+            height: 140,
+            barWidth: 2,
+            barGap: 1,
+            barRadius: 2,
+            normalize: true,
+            plugins: [
+                TimelinePlugin.create({
+                    container: '#editor-timeline',
+                    height: 22,
+                    insertPosition: 'beforebegin',
+                    style: { color: textSecondary, fontSize: '11px' },
+                }),
+                HoverPlugin.create({
+                    lineColor: textPrimary,
+                    lineWidth: 1,
+                    labelBackground: 'rgba(0, 0, 0, 0.75)',
+                    labelColor: '#ffffff',
+                    labelSize: '11px',
+                }),
+                ZoomPlugin.create({ scale: 0.5, maxZoom: 100 }),
+            ],
+        });
+
+        const regions = ws.registerPlugin(RegionsPlugin.create());
+
+        this.editorWavesurfer = ws;
+        this.editorRegions = regions;
+        this.editorPlayingRegion = false;
+
+        ws.on('ready', () => {
+            const duration = ws.getDuration();
+            const region = regions.addRegion({
+                start: 0,
+                end: Math.min(3, duration),
+                color: 'rgba(0, 255, 65, 0.18)',
+                drag: true,
+                resize: true,
+            });
+            this.editorRegion = region;
+            this._updateEditorSelectionLabel();
+            this._updateEditorTimeLabel();
+
+            region.on('update-end', () => this._updateEditorSelectionLabel());
+            region.on('out', () => {
+                if (this.editorLoop && this.editorPlayingRegion) {
+                    region.play();
+                }
+            });
+        });
+
+        ws.on('audioprocess', () => {
+            this._updateEditorTimeLabel();
+            if (
+                this.editorPlayingRegion &&
+                this.editorLoop &&
+                this.editorRegion &&
+                this.editorWavesurfer
+            ) {
+                const cur = this.editorWavesurfer.getCurrentTime();
+                if (cur >= this.editorRegion.end) {
+                    this.editorWavesurfer.setTime(this.editorRegion.start);
+                }
+            }
+        });
+        ws.on('seeking', () => this._updateEditorTimeLabel());
+        ws.on('play', () => this._setEditorPlayLabel(true));
+        ws.on('pause', () => {
+            this._setEditorPlayLabel(false);
+            this.editorPlayingRegion = false;
+        });
+        ws.on('finish', () => {
+            this._setEditorPlayLabel(false);
+            this.editorPlayingRegion = false;
+        });
+
+        // loadBlob evita pasar por fetch(blob:...), que la CSP de este proyecto bloquea.
+        const loadPromise = typeof ws.loadBlob === 'function'
+            ? ws.loadBlob(this.currentRecording)
+            : ws.load(this.createTrackedObjectURL(this.currentRecording));
+
+        Promise.resolve(loadPromise).catch((e) => {
+            console.error('WaveSurfer load error:', e);
+            this.showNotification('No se pudo cargar el audio en el editor', 'error');
+        });
+    },
+
+    _teardownPhraseEditor() {
+        try {
+            this.editorWavesurfer?.destroy();
+        } catch {
+            // Ignore destroy errors — the instance may already be gone.
+        }
+        this.editorWavesurfer = null;
+        this.editorRegions = null;
+        this.editorRegion = null;
+        this.editorPlayingRegion = false;
+    },
+
+    _updateEditorSelectionLabel() {
+        const el = document.querySelector('[data-role="editor-selection"]');
+        if (!el || !this.editorRegion) return;
+        const start = this.editorRegion.start;
+        const end = this.editorRegion.end;
+        const dur = Math.max(0, end - start);
+        el.textContent = `Selección: ${this.formatDuration(start)} → ${this.formatDuration(end)} (${dur.toFixed(2)} s)`;
+    },
+
+    _updateEditorTimeLabel() {
+        const el = document.querySelector('[data-role="editor-time"]');
+        if (!el || !this.editorWavesurfer) return;
+        const cur = this.editorWavesurfer.getCurrentTime();
+        const total = this.editorWavesurfer.getDuration();
+        el.textContent = `${this.formatDuration(cur)} / ${this.formatDuration(total)}`;
+    },
+
+    _setEditorPlayLabel(isPlaying) {
+        const btn = document.querySelector('[data-action="editor-toggle-play"]');
+        if (!btn) return;
+        const icon = btn.querySelector('i');
+        const label = btn.querySelector('[data-role="editor-play-label"]');
+        if (icon) icon.className = isPlaying ? 'fas fa-pause' : 'fas fa-play';
+        if (label) label.textContent = isPlaying ? 'Pause' : 'Play';
+    },
+
+    toggleEditorPlay() {
+        if (!this.editorWavesurfer) return;
+        this.editorPlayingRegion = false;
+        this.editorWavesurfer.playPause();
+    },
+
+    playSelection() {
+        if (!this.editorRegion || !this.editorWavesurfer) {
+            this.showNotification('Esperá a que se cargue el audio', 'info');
+            return;
+        }
+        const start = Math.max(0, this.editorRegion.start);
+        const end = Math.max(start + 0.05, this.editorRegion.end);
+        this.editorPlayingRegion = true;
+        try {
+            this.editorWavesurfer.setTime(start);
+            if (this.editorLoop) {
+                // Con loop activo dejamos correr al reproductor y el 'audioprocess'
+                // hace el salto atrás al llegar al final de la región.
+                this.editorWavesurfer.play();
+            } else {
+                // Sin loop, ws.play(start, end) pausa automáticamente al llegar al final.
+                this.editorWavesurfer.play(start, end);
+            }
+        } catch (e) {
+            console.error('playSelection error:', e);
+            this.editorRegion.play?.();
+        }
+    },
+
+    addPhrase() {
+        if (!this.editorRegion) {
+            this.showNotification('El editor todavía no está listo', 'info');
+            return;
+        }
+
+        const nameInput = document.getElementById('editor-phrase-name-input');
+        const typed = String(nameInput?.value || '').trim();
+        const nextIndex = (this.selectedPhrases?.length || 0) + 1;
+        const name = typed || `Frase ${nextIndex}`;
+
+        const start = Math.max(0, this.editorRegion.start);
+        const end = Math.max(start + 0.05, this.editorRegion.end);
+        const duration = end - start;
+
+        const phrase = {
+            id: Date.now(),
+            name,
+            description: `Frase de ${this.formatDuration(duration)}`,
+            style: 'custom',
+            audioBlob: null,
+            sourceBlob: this.currentRecording,
+            startTime: start,
+            duration,
+        };
+
+        this.selectedPhrases = this.selectedPhrases || [];
+        this.selectedPhrases.push(phrase);
+        this.updatePhrasesList();
+
+        if (nameInput) nameInput.value = '';
+
+        // Mover la región al siguiente hueco para facilitar seleccionar la próxima frase.
+        const total = this.editorWavesurfer?.getDuration() || 0;
+        if (total > 0) {
+            const nextStart = Math.min(end, Math.max(0, total - 0.5));
+            const nextEnd = Math.min(total, nextStart + Math.max(1, duration));
+            try {
+                this.editorRegion.setOptions({ start: nextStart, end: nextEnd });
+            } catch {
+                // Older wavesurfer versions no exponen setOptions — ignorar.
+            }
+            this._updateEditorSelectionLabel();
+        }
+
+        this.showNotification(`"${name}" agregada a la lista`, 'success');
     },
 
     initCurrentRecordingMetadata() {
@@ -1178,81 +1833,6 @@ export const audioFlowMixin = {
         if (!this.selectedPhrases || index < 0 || index >= this.selectedPhrases.length) return;
         this.selectedPhrases.splice(index, 1);
         this.updatePhrasesList();
-    },
-
-    _drawWaveform(canvas) {
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#0a0a0a';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.strokeStyle = '#00ff41';
-        ctx.lineWidth = 2;
-
-        ctx.beginPath();
-        ctx.moveTo(0, canvas.height / 2);
-        ctx.lineTo(canvas.width, canvas.height / 2);
-        ctx.stroke();
-
-        ctx.beginPath();
-        for (let x = 0; x < canvas.width; x += 5) {
-            const y = canvas.height / 2 + Math.sin(x * 0.05) * 50 * Math.random();
-            if (x === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-    },
-
-    initPhraseEditor() {
-        const canvas = document.getElementById('editor-waveform');
-        if (!canvas) return;
-
-        this.initCurrentRecordingMetadata();
-        this._drawWaveform(canvas);
-        this.setupPhraseSelection(canvas);
-    },
-
-    async decodeCurrentRecordingForEditor() {
-        if (!this.currentRecording) return;
-
-        if (this.editorDecodedSourceBlob === this.currentRecording && this.editorDecodedBuffer && this.editorPeaks) {
-            return;
-        }
-
-        const decodeCtx = this.audioContext || new (window.AudioContext || window.webkitAudioContext)();
-        if (decodeCtx.state === 'suspended') {
-            try { await decodeCtx.resume(); } catch { /* ignore */ }
-        }
-
-        try {
-            const arrBuf = await this.currentRecording.arrayBuffer();
-            const decoded = await decodeCtx.decodeAudioData(arrBuf.slice(0));
-            this.editorDecodedBuffer = decoded;
-            this.editorDecodedSourceBlob = this.currentRecording;
-            this.currentRecordingDuration = decoded.duration;
-            this.editorPeaks = this.computeWaveformPeaks(decoded, 2000);
-        } catch (e) {
-            console.error('Error decoding audio for editor:', e);
-            this.editorDecodedBuffer = null;
-            this.editorDecodedSourceBlob = null;
-            this.editorPeaks = null;
-            this.currentRecordingDuration = null;
-            this.showNotification('No se pudo cargar el audio en el editor', 'info');
-        }
-    },
-
-    getEditorMonoData() {
-        if (!this.editorDecodedBuffer) return null;
-        const buf = this.editorDecodedBuffer;
-        const len = buf.length;
-        const channels = buf.numberOfChannels;
-        if (channels === 1) return buf.getChannelData(0);
-
-        const mono = new Float32Array(len);
-        for (let c = 0; c < channels; c++) {
-            const ch = buf.getChannelData(c);
-            for (let i = 0; i < len; i++) mono[i] += ch[i] || 0;
-        }
-        for (let i = 0; i < len; i++) mono[i] /= channels;
-        return mono;
     },
 
     encodeWavMono(float32Samples, sampleRate) {
@@ -1291,598 +1871,6 @@ export const audioFlowMixin = {
         }
 
         return new Blob([buffer], { type: 'audio/wav' });
-    },
-
-    async exportSelectionToWavMono(startTime, duration) {
-        if (!this.currentRecording) return null;
-        if (!this.editorDecodedBuffer) {
-            await this.decodeCurrentRecordingForEditor();
-        }
-        if (!this.editorDecodedBuffer) return null;
-
-        const sr = this.editorDecodedBuffer.sampleRate;
-        const mono = this.getEditorMonoData();
-        if (!mono) return null;
-
-        try {
-            const safeStart = Math.max(0, Number(startTime) || 0);
-            const safeDur = Math.max(0.05, Number(duration) || 0);
-            const startSample = Math.max(0, Math.floor(safeStart * sr));
-            const endSample = Math.min(mono.length, Math.floor((safeStart + safeDur) * sr));
-            const slice = mono.slice(startSample, Math.max(startSample + 1, endSample));
-            return this.encodeWavMono(slice, sr);
-        } catch (e) {
-            console.error('Error exporting WAV mono:', e);
-            return null;
-        }
-    },
-
-    computeWaveformPeaks(audioBuffer, points = 2000) {
-        const channels = audioBuffer.numberOfChannels;
-        const length = audioBuffer.length;
-        const blockSize = Math.max(1, Math.floor(length / points));
-
-        const peaks = new Float32Array(points);
-        for (let i = 0; i < points; i++) {
-            const start = i * blockSize;
-            const end = Math.min(length, start + blockSize);
-            let max = 0;
-            for (let s = start; s < end; s++) {
-                let sample = 0;
-                for (let c = 0; c < channels; c++) {
-                    sample += audioBuffer.getChannelData(c)[s] || 0;
-                }
-                sample /= channels;
-                const abs = Math.abs(sample);
-                if (abs > max) max = abs;
-            }
-            peaks[i] = max;
-        }
-        return peaks;
-    },
-
-    setEditorZoom(zoom) {
-        this.editorZoom = Math.min(10, Math.max(1, zoom || 1));
-        this.ensureEditorViewContainsSelection();
-        this.renderEditor();
-    },
-
-    ensureEditorViewContainsSelection() {
-        const total = this.currentRecordingDuration || 0;
-        if (!total || !this.currentSelection) return;
-        const viewDur = total / this.editorZoom;
-        const selStart = this.currentSelection.startTime || 0;
-        const selEnd = (this.currentSelection.startTime || 0) + (this.currentSelection.duration || 0);
-        if (selStart < this.editorViewStart) this.editorViewStart = Math.max(0, selStart - 0.1);
-        if (selEnd > this.editorViewStart + viewDur) this.editorViewStart = Math.min(Math.max(0, total - viewDur), selEnd - viewDur + 0.1);
-    },
-
-    timeToX(t) {
-        const canvas = document.getElementById('editor-waveform');
-        if (!canvas) return 0;
-        const W = canvas.getBoundingClientRect().width || canvas.width;
-        const total = this.currentRecordingDuration || 30;
-        const viewDur = total / this.editorZoom;
-        const rel = (t - this.editorViewStart) / viewDur;
-        return rel * W;
-    },
-
-    xToTime(x) {
-        const canvas = document.getElementById('editor-waveform');
-        if (!canvas) return 0;
-        const W = canvas.getBoundingClientRect().width || canvas.width;
-        const total = this.currentRecordingDuration || 30;
-        const viewDur = total / this.editorZoom;
-        const rel = x / W;
-        return this.editorViewStart + rel * viewDur;
-    },
-
-    attachEditorMouseHandlers(canvas) {
-        // Clean previous handlers (from a previous modal open)
-        this.detachEditorMouseHandlers();
-        canvas.dataset.handlersAttached = '1';
-
-        const onDown = (e) => {
-            const rect = canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            this.editorLastMouseX = x;
-
-            const selStartX = this.timeToX(this.currentSelection?.startTime || 0);
-            const selEndX = this.timeToX((this.currentSelection?.startTime || 0) + (this.currentSelection?.duration || 0));
-            const handlePad = 8;
-
-            if (Math.abs(x - selStartX) <= handlePad) {
-                this.editorDragging = 'start';
-                return;
-            }
-            if (Math.abs(x - selEndX) <= handlePad) {
-                this.editorDragging = 'end';
-                return;
-            }
-            if (x > selStartX && x < selEndX) {
-                this.editorDragging = 'region';
-                return;
-            }
-
-            // Click fuera => nueva selección desde punto (2s por defecto)
-            const t = this.xToTime(x);
-            const total = this.currentRecordingDuration || 30;
-            const dur = Math.min(2, Math.max(0.1, total - t));
-            this.currentSelection = {
-                startPx: 0,
-                endPx: 0,
-                startTime: t,
-                duration: dur,
-                endTime: t + dur
-            };
-            this.ensureEditorViewContainsSelection();
-            this.updateEditorTimesUI();
-            this.renderEditor();
-        };
-
-        const onMove = (e) => {
-            if (!this.editorDragging || !this.currentSelection) return;
-            
-            const rect = canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const dx = x - this.editorLastMouseX;
-            this.editorLastMouseX = x;
-
-            const total = this.currentRecordingDuration || 30;
-            const deltaT = this.xToTime(dx) - this.xToTime(0);
-
-            const start = this.currentSelection.startTime || 0;
-            const dur = this.currentSelection.duration || 0;
-            const end = start + dur;
-
-            if (this.editorDragging === 'region') {
-                const newStart = Math.min(Math.max(0, start + deltaT), Math.max(0, total - dur));
-                this.currentSelection.startTime = newStart;
-                this.currentSelection.endTime = newStart + dur;
-            } else if (this.editorDragging === 'start') {
-                const newStart = Math.min(Math.max(0, start + deltaT), end - 0.05);
-                this.currentSelection.startTime = newStart;
-                this.currentSelection.duration = Math.max(0.05, end - newStart);
-                this.currentSelection.endTime = newStart + this.currentSelection.duration;
-            } else if (this.editorDragging === 'end') {
-                const newEnd = Math.max(start + 0.05, Math.min(total, end + deltaT));
-                this.currentSelection.duration = Math.max(0.05, newEnd - start);
-                this.currentSelection.endTime = start + this.currentSelection.duration;
-            }
-
-            this.ensureEditorViewContainsSelection();
-            this.updateEditorTimesUI();
-            this.renderEditor();
-        };
-
-        const onUp = () => {
-            this.editorDragging = null;
-        };
-
-        canvas.addEventListener('mousedown', onDown);
-        window.addEventListener('mousemove', onMove);
-        window.addEventListener('mouseup', onUp);
-
-        this._editorCanvas = canvas;
-        this._editorOnDown = onDown;
-        this._editorOnMove = onMove;
-        this._editorOnUp = onUp;
-    },
-
-    detachEditorMouseHandlers() {
-        if (this._editorCanvas && this._editorOnDown) {
-            try { this._editorCanvas.removeEventListener('mousedown', this._editorOnDown); } catch {}
-        }
-        if (this._editorOnMove) {
-            try { window.removeEventListener('mousemove', this._editorOnMove); } catch {}
-        }
-        if (this._editorOnUp) {
-            try { window.removeEventListener('mouseup', this._editorOnUp); } catch {}
-        }
-        this._editorCanvas = null;
-        this._editorOnDown = null;
-        this._editorOnMove = null;
-        this._editorOnUp = null;
-    },
-
-    renderEditor() {
-        const canvas = document.getElementById('editor-waveform');
-        if (!canvas) return;
-        const ctx = canvas.getContext('2d');
-        // Sync canvas buffer size to CSS display size to avoid coordinate mismatch
-        const W = canvas.getBoundingClientRect().width || canvas.width;
-        const H = canvas.getBoundingClientRect().height || canvas.height;
-        if (canvas.width !== Math.round(W)) canvas.width = Math.round(W);
-        if (canvas.height !== Math.round(H)) canvas.height = Math.round(H);
-
-        ctx.fillStyle = '#0a0a0a';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        // Waveform real
-        if (this.editorPeaks && (this.currentRecordingDuration || 0) > 0) {
-            const mid = canvas.height / 2;
-            const amp = (canvas.height / 2) * 0.9;
-
-            ctx.strokeStyle = '#00ff41';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-
-            const total = this.currentRecordingDuration;
-            const viewDur = total / this.editorZoom;
-            const startT = this.editorViewStart;
-
-            const peaks = this.editorPeaks;
-            const points = peaks.length;
-
-            for (let x = 0; x < canvas.width; x++) {
-                const t = startT + (x / canvas.width) * viewDur;
-                const idx = Math.min(points - 1, Math.max(0, Math.floor((t / total) * points)));
-                const p = peaks[idx];
-                const y = mid - p * amp;
-                if (x === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
-            }
-            ctx.stroke();
-
-            // Línea base
-            ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(0, mid);
-            ctx.lineTo(canvas.width, mid);
-            ctx.stroke();
-        }
-
-        // Región seleccionada + handles
-        if (this.currentSelection) {
-            const selStartX = this.timeToX(this.currentSelection.startTime || 0);
-            const selEndX = this.timeToX((this.currentSelection.startTime || 0) + (this.currentSelection.duration || 0));
-            const left = Math.min(selStartX, selEndX);
-            const right = Math.max(selStartX, selEndX);
-
-            ctx.fillStyle = 'rgba(0, 212, 255, 0.18)';
-            ctx.fillRect(left, 0, Math.max(1, right - left), canvas.height);
-
-            ctx.strokeStyle = '#00d4ff';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(left, 0, Math.max(1, right - left), canvas.height);
-
-            // handles
-            ctx.fillStyle = '#00d4ff';
-            const hw = 6;
-            ctx.fillRect(left - hw / 2, 0, hw, canvas.height);
-            ctx.fillRect(right - hw / 2, 0, hw, canvas.height);
-        }
-
-        // Playhead
-        if (this.editorAudio && !Number.isNaN(this.editorAudio.currentTime)) {
-            const px = this.timeToX(this.editorAudio.currentTime);
-            ctx.strokeStyle = 'rgba(255, 0, 64, 0.95)';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.moveTo(px, 0);
-            ctx.lineTo(px, canvas.height);
-            ctx.stroke();
-        }
-
-        this.updateEditorTimesUI();
-    },
-
-    updateEditorTimesUI() {
-        const startEl = document.getElementById('sel-start');
-        const endEl = document.getElementById('sel-end');
-        const durEl = document.getElementById('sel-dur');
-        if (!startEl || !endEl || !durEl || !this.currentSelection) return;
-
-        const start = this.currentSelection.startTime || 0;
-        const dur = this.currentSelection.duration || 0;
-        const end = start + dur;
-        startEl.textContent = this.formatDuration(start);
-        endEl.textContent = this.formatDuration(end);
-        durEl.textContent = this.formatDuration(dur);
-    },
-
-    toggleEditorLoop() {
-        this.editorLoop = !this.editorLoop;
-        const loopBtn = document.getElementById('editor-loop');
-        if (loopBtn) {
-            loopBtn.innerHTML = `<i class="fas fa-redo"></i> Loop: ${this.editorLoop ? 'ON' : 'OFF'}`;
-        }
-    },
-
-    toggleEditorPlayback() {
-        if (this.editorIsPlaying) {
-            this.stopEditorPlayback();
-            return;
-        }
-        this.startEditorPlayback();
-    },
-
-    startEditorPlayback() {
-        if (!this.currentRecording) return;
-        if (!this.currentSelection) return;
-
-        this.stopEditorPlayback();
-        const url = this.createTrackedObjectURL(this.currentRecording);
-        this.editorAudio = new Audio(url);
-        this.editorAudio.play();
-        this.editorAudio.onended = () => this.cleanupObjectURL(url);
-        this.editorAudio.currentTime = Math.max(0, this.currentSelection.startTime || 0);
-
-        const endTime = Math.max(0, (this.currentSelection.startTime || 0) + (this.currentSelection.duration || 0));
-        this.editorIsPlaying = true;
-        this.updateEditorPlayButton();
-
-        const tick = () => {
-            if (!this.editorIsPlaying || !this.editorAudio) return;
-            if (this.editorLoop && this.editorAudio.currentTime >= endTime) {
-                this.editorAudio.currentTime = Math.max(0, this.currentSelection.startTime || 0);
-            }
-            this.renderEditor();
-            this.editorPlayheadRaf = requestAnimationFrame(tick);
-        };
-
-        this.editorAudio.addEventListener('ended', () => {
-            this.cleanupObjectURL(url);
-            if (!this.editorLoop) this.stopEditorPlayback();
-        });
-
-        this.editorAudio.addEventListener('error', () => {
-            this.cleanupObjectURL(url);
-            this.stopEditorPlayback();
-        });
-
-        this.editorAudio.play().catch(() => {
-            this.stopEditorPlayback();
-        });
-
-        this.editorPlayheadRaf = requestAnimationFrame(tick);
-    },
-
-    stopEditorPlayback() {
-        this.editorIsPlaying = false;
-        if (this.editorPlayheadRaf) {
-            cancelAnimationFrame(this.editorPlayheadRaf);
-            this.editorPlayheadRaf = null;
-        }
-        if (this.editorAudio) {
-            try { this.editorAudio.pause(); } catch {}
-        }
-        this.updateEditorPlayButton();
-        const canvas = document.getElementById('editor-waveform');
-        if (canvas) this.renderEditor();
-    },
-
-    updateEditorPlayButton() {
-        const playBtn = document.getElementById('editor-play');
-        if (!playBtn) return;
-        playBtn.innerHTML = this.editorIsPlaying
-            ? '<i class="fas fa-pause"></i> Pause'
-            : '<i class="fas fa-play"></i> Play';
-    },
-
-    setupPhraseSelection(canvas) {
-        if (this._phraseSelectionController) {
-            this._phraseSelectionController.abort();
-        }
-        this._phraseSelectionController = new AbortController();
-        const signal = this._phraseSelectionController.signal;
-
-        let isSelecting = false;
-        let startX = 0;
-        let endX = 0;
-
-        const handleMouseDown = (e) => {
-            isSelecting = true;
-            startX = e.offsetX;
-            endX = e.offsetX;
-
-            this._drawWaveform(canvas);
-        };
-
-        const handleMouseMove = (e) => {
-            if (!isSelecting) return;
-            endX = e.offsetX;
-            this.drawSelection(canvas, startX, endX);
-        };
-
-        const handleMouseUp = (e) => {
-            if (!isSelecting) return;
-            isSelecting = false;
-            endX = e.offsetX;
-            this.highlightSelection(canvas, startX, endX);
-        };
-
-        canvas.addEventListener('mousedown', handleMouseDown, { signal });
-        canvas.addEventListener('mousemove', handleMouseMove, { signal });
-        canvas.addEventListener('mouseup', handleMouseUp, { signal });
-        canvas.addEventListener('mouseleave', handleMouseUp, { signal });
-    },
-
-    drawSelection(canvas, startX, endX) {
-        const ctx = canvas.getContext('2d');
-        
-        // Redibujar waveform
-        ctx.fillStyle = '#0a0a0a';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.strokeStyle = '#00ff41';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        
-        // Redibujar línea de base
-        ctx.moveTo(0, canvas.height / 2);
-        ctx.lineTo(canvas.width, canvas.height / 2);
-        ctx.stroke();
-        
-        // Redibujar waveform simulado
-        ctx.beginPath();
-        for (let x = 0; x < canvas.width; x += 5) {
-            const y = canvas.height / 2 + Math.sin(x * 0.05) * 50 * Math.random();
-            if (x === 0) {
-                ctx.moveTo(x, y);
-            } else {
-                ctx.lineTo(x, y);
-            }
-        }
-        ctx.stroke();
-        
-        // Dibujar selección
-        ctx.fillStyle = 'rgba(0, 212, 255, 0.3)';
-        const selectionStart = Math.min(startX, endX);
-        const selectionWidth = Math.abs(endX - startX);
-        ctx.fillRect(selectionStart, 0, selectionWidth, canvas.height);
-        
-        // Dibujar bordes de selección
-        ctx.strokeStyle = '#00d4ff';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(selectionStart, 0, selectionWidth, canvas.height);
-    },
-
-    highlightSelection(canvas, startX, endX) {
-        this.drawSelection(canvas, startX, endX);
-
-        const selectionStartPx = Math.min(startX, endX);
-        const selectionEndPx = Math.max(startX, endX);
-        const startRatio = selectionStartPx / canvas.width;
-        const endRatio = selectionEndPx / canvas.width;
-        const durationRatio = Math.max(0, endRatio - startRatio);
-
-        const totalDuration = this.currentRecordingDuration || 30;
-        const startTime = startRatio * totalDuration;
-        const duration = durationRatio * totalDuration;
-
-        // Guardar selección en unidades de tiempo reales
-        this.currentSelection = {
-            startPx: selectionStartPx,
-            endPx: selectionEndPx,
-            startTime,
-            duration,
-            endTime: startTime + duration
-        };
-        
-        // Mostrar información de la selección
-        const selectionDuration = this.currentSelection.duration.toFixed(1);
-        console.log(`Selección: ${selectionDuration} segundos`);
-    },
-
-    playSelection() {
-        if (!this.currentSelection || !this.currentRecording) {
-            this.showNotification('Primero selecciona un fragmento en el editor', 'info');
-            return;
-        }
-
-        const url = this.createTrackedObjectURL(this.currentRecording);
-        const audio = new Audio(url);
-        const startTime = Math.max(0, this.currentSelection.startTime || 0);
-        const duration = Math.max(0.1, this.currentSelection.duration || 0);
-
-        audio.addEventListener('canplay', () => {
-            audio.currentTime = startTime;
-            audio.play().catch(err => {
-                console.error('Error reproduciendo selección:', err);
-                this.showNotification('Error al reproducir. Intenta de nuevo.', 'error');
-                this.cleanupObjectURL(url);
-            });
-        }, { once: true });
-
-        audio.addEventListener('error', () => {
-            this.showNotification('Error al cargar el audio', 'error');
-            this.cleanupObjectURL(url);
-        }, { once: true });
-
-        const stopTimer = setTimeout(() => {
-            audio.pause();
-            this.cleanupObjectURL(url);
-        }, duration * 1000);
-
-        audio.onended = () => {
-            clearTimeout(stopTimer);
-            this.cleanupObjectURL(url);
-        };
-    },
-
-    addPhrase() {
-        if (!this.currentSelection) {
-            this.showNotification('Primero selecciona un fragmento arrastrando sobre el waveform', 'info');
-            return;
-        }
-
-        const savedSelection = { ...this.currentSelection };
-        const savedRecording = this.currentRecording;
-
-        const overlay = document.createElement('div');
-        overlay.style.cssText = `
-            position: fixed; inset: 0; background: rgba(0,0,0,0.75);
-            display: flex; align-items: center; justify-content: center;
-            z-index: 20000;
-        `;
-        overlay.innerHTML = `
-            <div style="background: var(--bg-secondary, #1a1a2e); border: 1px solid #00ff41;
-                        border-radius: 12px; padding: 2rem; max-width: 380px; width: 90%;">
-                <p style="margin: 0 0 1rem; color: #fff; font-weight: bold; font-family: monospace;">
-                    Nombre de la frase
-                </p>
-                <p style="margin: 0 0 1rem; color: #aaa; font-size: 0.85rem;">
-                    Duración: ${(savedSelection.duration || 0).toFixed(1)}s
-                </p>
-                <input id="phrase-name-overlay-input" type="text"
-                    placeholder="Ej: Lick bebop compás 4"
-                    style="width: 100%; padding: 0.6rem; border-radius: 8px;
-                           border: 1px solid #00ff41; background: #0a0a0a;
-                           color: #fff; font-size: 1rem; box-sizing: border-box;
-                           margin-bottom: 1.2rem;" />
-                <div style="display: flex; gap: 0.8rem; justify-content: flex-end;">
-                    <button id="phrase-overlay-cancel"
-                        style="padding: 0.5rem 1.2rem; border-radius: 8px;
-                               border: 1px solid #444; background: transparent;
-                               color: #aaa; cursor: pointer;">Cancelar</button>
-                    <button id="phrase-overlay-ok"
-                        style="padding: 0.5rem 1.2rem; border-radius: 8px;
-                               border: none; background: #00ff41;
-                               color: #000; cursor: pointer; font-weight: bold;">Guardar</button>
-                </div>
-            </div>
-        `;
-        document.body.appendChild(overlay);
-
-        const input = overlay.querySelector('#phrase-name-overlay-input');
-        setTimeout(() => input.focus(), 50);
-
-        const confirm = () => {
-            const phraseName = String(input.value || '').trim();
-            document.body.removeChild(overlay);
-            if (!phraseName) return;
-
-            const phrase = {
-                id: Date.now(),
-                name: phraseName,
-                description: `Frase de ${this.formatDuration(savedSelection.duration)}`,
-                style: 'custom',
-                audioBlob: null,
-                sourceBlob: savedRecording,
-                startTime: savedSelection.startTime,
-                duration: savedSelection.duration
-            };
-
-            this.selectedPhrases = this.selectedPhrases || [];
-            this.selectedPhrases.push(phrase);
-            this.updatePhrasesList();
-            this.currentSelection = null;
-
-            const canvas = document.getElementById('editor-waveform');
-            if (canvas) this.initPhraseEditor();
-
-            this.showNotification(`"${phraseName}" agregada a la lista`, 'success');
-        };
-
-        overlay.querySelector('#phrase-overlay-ok').addEventListener('click', confirm);
-        overlay.querySelector('#phrase-overlay-cancel').addEventListener('click', () => {
-            document.body.removeChild(overlay);
-        });
-        input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') confirm();
-            if (e.key === 'Escape') document.body.removeChild(overlay);
-        });
     },
 
     async ensurePhraseHasExportedAudio(phrase) {
@@ -1941,7 +1929,10 @@ export const audioFlowMixin = {
         let saved = 0;
 
         for (const phrase of this.selectedPhrases) {
-            await this.ensurePhraseHasExportedAudio(phrase);
+            const wav = await this.ensurePhraseHasExportedAudio(phrase);
+            if (!wav) {
+                console.warn('savePhrasesToLicks: no se pudo exportar WAV para', phrase.name);
+            }
 
             // Insert the lick row first to get its UUID
             const { data: lickRow, error: insertErr } = await insertLick({
@@ -1950,14 +1941,20 @@ export const audioFlowMixin = {
                 notes: phrase.description || '',
                 order_index: this.licks.length + saved
             });
-            if (insertErr || !lickRow) continue;
+            if (insertErr || !lickRow) {
+                console.error('savePhrasesToLicks: insertLick falló', insertErr);
+                continue;
+            }
 
             // Upload the trimmed audio blob
             const trimmedBlob = phrase.audioBlob instanceof Blob ? phrase.audioBlob : null;
             if (trimmedBlob) {
                 const { filePath, error: uploadErr } = await uploadLickAudio(trimmedBlob, lickRow.id);
-                if (!uploadErr && filePath) {
-                    await updateLick(lickRow.id, { file_path: filePath });
+                if (uploadErr) {
+                    console.error('savePhrasesToLicks: uploadLickAudio falló', uploadErr);
+                } else if (filePath) {
+                    const { error: updErr } = await updateLick(lickRow.id, { file_path: filePath });
+                    if (updErr) console.error('savePhrasesToLicks: updateLick falló', updErr);
                 }
             }
             saved++;
