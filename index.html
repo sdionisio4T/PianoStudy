@@ -506,6 +506,10 @@
                             <label class="analysis-context__field analysis-context__field--full">
                                 <span>Objetivo de esta práctica (opcional)</span>
                                 <input id="analysis-objective" type="text" maxlength="140" placeholder="ej: mejorar el ii-V-I sobre Autumn Leaves" class="recording-select" />
+                                <div id="objective-delimit-container" class="objective-delimit hidden" aria-live="polite">
+                                    <span class="objective-delimit__label" id="objective-delimit-status">🔎 Para afinar tu objetivo:</span>
+                                    <div id="objective-delimit-chips" class="objective-delimit__chips"></div>
+                                </div>
                             </label>
                             <label class="analysis-context__field analysis-context__field--full">
                                 <span>Notas para la IA (opcional)</span>
@@ -578,12 +582,22 @@
                         </div>
 
                         <div class="analysis-section">
-                            <h3><i class="fas fa-music"></i> Análisis Musical</h3>
+                            <h3><span class="section-emoji" aria-hidden="true">🎹</span> Análisis musical</h3>
                             <div class="analysis-content" id="musical-analysis"></div>
                         </div>
 
+                        <div class="analysis-section analysis-strengths-section hidden" id="analysis-strengths-section">
+                            <h3><span class="section-emoji" aria-hidden="true">✅</span> Lo que estás haciendo bien</h3>
+                            <ul id="analysis-strengths-list" class="analysis-strengths-list"></ul>
+                        </div>
+
+                        <div class="analysis-section analysis-belief-section hidden" id="analysis-belief-section">
+                            <h3><span class="section-emoji" aria-hidden="true">🎯</span> Tu oído vs los datos</h3>
+                            <p class="analysis-belief__text" id="analysis-belief-text"></p>
+                        </div>
+
                         <div class="analysis-section analysis-observations-section hidden" id="analysis-observations-section">
-                            <h3><i class="fas fa-layer-group"></i> Observaciones estructuradas</h3>
+                            <h3><span class="section-emoji" aria-hidden="true">🔎</span> Observaciones estructuradas</h3>
                             <p class="analysis-observations-hint">Cada observación va en tres niveles: qué muestran los datos, qué sugieren musicalmente y qué podés experimentar para verificarlo.</p>
                             <div id="analysis-observations-list" class="analysis-observations-list"></div>
                         </div>
@@ -617,14 +631,23 @@
                             </div>
                         </div>
 
+                        <div class="analysis-section analysis-primary-focus hidden" id="analysis-primary-focus-section">
+                            <h3><span class="section-emoji" aria-hidden="true">🎯</span> Tu principal foco</h3>
+                            <p class="analysis-primary-focus__text" id="analysis-primary-focus-text"></p>
+                        </div>
+
                         <div class="analysis-section">
-                            <h3><i class="fas fa-lightbulb"></i> Ejercicio de esta semana</h3>
+                            <h3><span class="section-emoji" aria-hidden="true">🧪</span> Ejercicio de esta semana</h3>
                             <div class="practice-suggestions" id="practice-suggestions"></div>
                         </div>
 
                         <div class="analysis-section analysis-next-goal hidden" id="analysis-next-goal-section">
-                            <h3><i class="fas fa-flag-checkered"></i> Objetivo próxima sesión</h3>
+                            <h3><span class="section-emoji" aria-hidden="true">🏁</span> Objetivo próxima sesión</h3>
                             <p class="analysis-next-goal__text" id="analysis-next-goal-text"></p>
+                        </div>
+
+                        <div class="analysis-section analysis-metaq-section hidden" id="analysis-metaq-section">
+                            <p class="analysis-metaq__text" id="analysis-metaq-text"></p>
                         </div>
 
                         <div class="analysis-section">
@@ -671,6 +694,18 @@
                             <button id="export-analysis-btn" class="btn-secondary">
                                 <i class="fas fa-download"></i> Exportar análisis (.txt)
                             </button>
+                        </div>
+                    </div>
+
+                    <!-- Cómo mejora tu oído (Fase B1 SRL — calibración cross-sesión) -->
+                    <div class="analysis-calibration hidden" id="analysis-calibration-panel">
+                        <div class="analysis-calibration__header">
+                            <h3><span aria-hidden="true">👂</span> Cómo mejora tu oído</h3>
+                            <button type="button" class="analysis-calibration__toggle" id="analysis-calibration-toggle" aria-expanded="false">Mostrar</button>
+                        </div>
+                        <div class="analysis-calibration__body hidden" id="analysis-calibration-body">
+                            <p class="analysis-calibration__intro">Cada vez que hacés una autoevaluación previa, comparo tu impresión con lo que detectan los datos. Este panel muestra si tu oído se acerca al análisis con el tiempo.</p>
+                            <div id="analysis-calibration-content"></div>
                         </div>
                     </div>
 
@@ -1023,6 +1058,58 @@
         <div class="modal-content">
             <span class="close">&times;</span>
             <div id="modal-body"></div>
+        </div>
+    </div>
+
+    <!-- Modal de autoevaluación previa al análisis (Fase A SRL).
+         Se muestra tras "Analizar Grabación" para que el pianista prediga qué va a mostrar
+         el análisis. Los 3 campos son opcionales — botón "Saltar" pasa directo al análisis. -->
+    <div id="self-eval-modal" class="self-eval-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="self-eval-title">
+        <div class="self-eval-box">
+            <header class="self-eval-header">
+                <h3 id="self-eval-title"><span aria-hidden="true">🎯</span> Antes del análisis</h3>
+                <p class="self-eval-subtitle">Contanos qué esperás encontrar. Después vamos a comparar con lo que detecte el análisis — te ayuda a escuchar mejor.</p>
+            </header>
+
+            <div class="self-eval-field">
+                <label for="self-eval-rating">¿Cómo sentiste esta toma?</label>
+                <div class="self-eval-rating">
+                    <input type="range" id="self-eval-rating" min="1" max="5" step="1" value="3" list="self-eval-rating-ticks">
+                    <datalist id="self-eval-rating-ticks">
+                        <option value="1"></option>
+                        <option value="2"></option>
+                        <option value="3"></option>
+                        <option value="4"></option>
+                        <option value="5"></option>
+                    </datalist>
+                    <div class="self-eval-rating-scale" aria-hidden="true">
+                        <span>1</span><span>2</span><span>3</span><span>4</span><span>5</span>
+                    </div>
+                    <output for="self-eval-rating" id="self-eval-rating-value" class="self-eval-rating-value">3/5</output>
+                </div>
+            </div>
+
+            <div class="self-eval-field">
+                <span class="self-eval-label">¿Dónde te pareció que estuvo lo más flojo?</span>
+                <div class="self-eval-chips" role="radiogroup" aria-label="Área más floja">
+                    <button type="button" class="self-eval-chip" data-value="timing" role="radio" aria-checked="false">Timing</button>
+                    <button type="button" class="self-eval-chip" data-value="dinamica" role="radio" aria-checked="false">Dinámica</button>
+                    <button type="button" class="self-eval-chip" data-value="notas" role="radio" aria-checked="false">Notas</button>
+                    <button type="button" class="self-eval-chip" data-value="fraseo" role="radio" aria-checked="false">Fraseo</button>
+                    <button type="button" class="self-eval-chip" data-value="otro" role="radio" aria-checked="false">Otro</button>
+                </div>
+            </div>
+
+            <div class="self-eval-field">
+                <label for="self-eval-prediction">En una frase, ¿qué crees que va a mostrar el análisis?</label>
+                <textarea id="self-eval-prediction" rows="2" maxlength="200" placeholder="Ej: creo que aceleré en las frases descendentes"></textarea>
+                <span class="self-eval-hint" id="self-eval-prediction-count">0 / 200</span>
+            </div>
+
+            <div class="self-eval-actions">
+                <button type="button" class="self-eval-btn self-eval-btn--skip" id="self-eval-skip">Saltar por hoy</button>
+                <button type="button" class="self-eval-btn self-eval-btn--go" id="self-eval-submit">Analizar</button>
+            </div>
         </div>
     </div>
 

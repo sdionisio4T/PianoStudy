@@ -1269,8 +1269,116 @@
 
 .layered-obs__header {
     display: flex;
-    justify-content: flex-end;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
 }
+
+/* Botón "no aplica" — Fase B2 SRL. Discreto por default para no invitar
+   a rechazar todo; se vuelve más visible en hover. Cuando la observation
+   está rechazada, el estilo del artículo entero cambia. */
+.layered-obs__reject-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    padding: 0.15rem 0.55rem;
+    border-radius: 8px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    opacity: 0.55;
+    transition: opacity 0.15s, background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.layered-obs__reject-btn:hover {
+    opacity: 1;
+    background: rgba(255, 128, 128, 0.08);
+    border-color: rgba(255, 128, 128, 0.3);
+    color: #ff8080;
+}
+
+.layered-obs.is-rejected {
+    opacity: 0.55;
+    background: rgba(255, 128, 128, 0.04);
+    border-color: rgba(255, 128, 128, 0.15);
+}
+
+.layered-obs.is-rejected .layered-obs__reject-btn {
+    opacity: 1;
+    color: #ff8080;
+    border-color: rgba(255, 128, 128, 0.35);
+    cursor: default;
+}
+
+.layered-obs__reject-form {
+    margin-top: 0.75rem;
+    padding: 0.85rem;
+    background: rgba(255, 128, 128, 0.05);
+    border: 1px dashed rgba(255, 128, 128, 0.28);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+}
+
+.layered-obs__reject-form.hidden { display: none; }
+
+.layered-obs__reject-form label {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
+.layered-obs__reject-form textarea {
+    width: 100%;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    padding: 0.5rem 0.65rem;
+    font-family: inherit;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    resize: vertical;
+    min-height: 2.6em;
+}
+
+.layered-obs__reject-form textarea:focus {
+    outline: none;
+    border-color: rgba(255,128,128,0.5);
+}
+
+.layered-obs__reject-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.55rem;
+}
+
+.layered-obs__reject-actions button {
+    padding: 0.35rem 0.9rem;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.layered-obs__reject-cancel {
+    background: transparent;
+    border-color: var(--border-color);
+    color: var(--text-secondary);
+}
+
+.layered-obs__reject-cancel:hover { background: rgba(255,255,255,0.05); }
+
+.layered-obs__reject-confirm {
+    background: rgba(255, 128, 128, 0.14);
+    border-color: rgba(255, 128, 128, 0.4);
+    color: #ff8080;
+}
+
+.layered-obs__reject-confirm:hover { background: rgba(255, 128, 128, 0.24); }
 
 .layered-obs__confidence {
     font-size: 0.72rem;
@@ -1328,6 +1436,105 @@
         min-width: 0;
         align-self: flex-start;
     }
+}
+
+/* Emoji prefijo en headers — un poco más grande que el texto adyacente para
+   que se lea como icono. Consistente con el resto de la app que mezcla FA
+   icons y emoji según la sección. */
+.section-emoji {
+    font-size: 1.1em;
+    margin-right: 0.35rem;
+    line-height: 1;
+}
+
+/* "Lo que estás haciendo bien" — bullets simples con checkmark verde, máx 2.
+   Diseño discreto para que no compita con el foco/ejercicio (REGLA 8). */
+.analysis-strengths-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+}
+
+.analysis-strength-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    color: var(--text-primary);
+    font-size: 0.95rem;
+    line-height: 1.5;
+}
+
+.analysis-strength-item > i {
+    color: var(--accent-green);
+    margin-top: 0.25rem;
+    flex-shrink: 0;
+}
+
+/* "Tu principal foco" — banner destacado que hace de PUENTE al ejercicio.
+   Solo 1 línea (REGLA 8 + regla de oro: la ÚNICA cosa importante). Border
+   izquierdo grueso con accent — visualmente obvio, no ignorable. */
+.analysis-primary-focus {
+    border-left: 4px solid var(--accent-orange);
+}
+
+.analysis-primary-focus__text {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 1.05rem;
+    line-height: 1.55;
+    font-weight: 500;
+}
+
+/* Ejercicio de esta semana — nuevo formato structured (steps + checkQuestion).
+   Los steps van como lista ordenada con títulos internos claros ("Qué hacer"
+   / "Qué comprobar") — el pianista puede leerlos y actuar sin volver a leer
+   el foco (REGLA 8). Back-compat: si viene description prosa (schema viejo),
+   se usa .suggestion-description (estilo existente) y estos bloques no aparecen. */
+.exercise-steps,
+.exercise-check {
+    margin-top: 0.85rem;
+}
+
+.exercise-steps__label,
+.exercise-check__label {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    margin-bottom: 0.4rem;
+}
+
+.exercise-steps__list {
+    padding-left: 1.25rem;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    color: var(--text-primary);
+    font-size: 0.95rem;
+    line-height: 1.5;
+}
+
+.exercise-steps__list li::marker { color: var(--accent-blue); }
+
+.exercise-check {
+    padding: 0.7rem 0.85rem;
+    background: var(--bg-tertiary);
+    border-left: 3px solid var(--accent-blue);
+    border-radius: 4px;
+}
+
+.exercise-check__question {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 0.95rem;
+    font-style: italic;
+    line-height: 1.5;
 }
 
 .analysis-section {
@@ -1592,6 +1799,54 @@
     font-size: 1rem;
     line-height: 1.5;
     margin: 0.25rem 0 0;
+}
+
+/* "Tu oído vs los datos" — Fase A SRL.
+   Sección que compara la autoevaluación previa del pianista con lo que
+   detectaron los datos. Se pinta entre strengths y observations para que
+   el pianista lea la calibración antes de las observaciones estructuradas. */
+.analysis-belief-section {
+    border-left: 3px solid var(--accent-orange, #ff8c00);
+    background: rgba(255, 140, 0, 0.05);
+    padding: 1rem 1rem 1rem 1.25rem;
+    border-radius: 0 8px 8px 0;
+}
+
+.analysis-belief-section.hidden { display: none; }
+
+.analysis-belief__text {
+    margin: 0.35rem 0 0;
+    color: var(--text-primary);
+    font-size: 1rem;
+    line-height: 1.55;
+}
+
+/* Pregunta metacognitiva final — Fase A SRL.
+   Última sección del análisis. Sin encabezado; estilo distinto (itálica,
+   fondo tenue) para que se sienta como una pregunta abierta y no como
+   una sección más. Es lo que le queda al pianista dando vueltas. */
+.analysis-metaq-section {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px dashed rgba(255, 255, 255, 0.12);
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+    margin-top: 0.5rem;
+}
+
+.analysis-metaq-section.hidden { display: none; }
+
+.analysis-metaq__text {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 1rem;
+    line-height: 1.5;
+    font-style: italic;
+}
+
+.analysis-metaq__text::before {
+    content: "❓ ";
+    font-style: normal;
+    margin-right: 0.15rem;
 }
 
 .analysis-waveform {
@@ -2677,6 +2932,393 @@
 
 .confirm-modal-btn--ok:hover {
     background: rgba(0,255,65,0.22);
+}
+
+/* Vista "Cómo mejora tu oído" (Fase B1 SRL — calibración cross-sesión).
+   Panel colapsable que muestra cómo evoluciona la brecha entre la
+   autoevaluación del pianista y lo que detectan los datos. NO es una
+   medalla ni un score: es un espejo. */
+.analysis-calibration {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.5rem;
+}
+
+.analysis-calibration.hidden { display: none; }
+
+.analysis-calibration__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.analysis-calibration__header h3 {
+    margin: 0;
+    font-size: 1.05rem;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.analysis-calibration__toggle {
+    background: rgba(0,255,65,0.1);
+    border: 1px solid rgba(0,255,65,0.35);
+    color: var(--accent-green);
+    padding: 0.35rem 0.9rem;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.analysis-calibration__toggle:hover { background: rgba(0,255,65,0.18); }
+
+.analysis-calibration__body {
+    margin-top: 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+}
+
+.analysis-calibration__body.hidden { display: none; }
+
+.analysis-calibration__intro {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+.calibration-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.75rem;
+}
+
+.calibration-stat {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.65rem 0.85rem;
+    text-align: center;
+}
+
+.calibration-stat__value {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: var(--accent-green);
+}
+
+.calibration-stat__label {
+    display: block;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-top: 0.15rem;
+}
+
+.calibration-trend {
+    padding: 0.55rem 0.85rem;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    text-align: center;
+    color: var(--text-primary);
+}
+
+.calibration-trend--mejorando {
+    background: rgba(0,255,65,0.09);
+    border: 1px solid rgba(0,255,65,0.35);
+}
+
+.calibration-trend--bajando {
+    background: rgba(255,128,128,0.09);
+    border: 1px solid rgba(255,128,128,0.3);
+}
+
+.calibration-trend--estable {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--border-color);
+}
+
+.calibration-mini-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.35rem;
+    height: 80px;
+    padding: 0.5rem 0.65rem;
+    background: rgba(255,255,255,0.02);
+    border-radius: 8px;
+    border: 1px dashed var(--border-color);
+}
+
+.calibration-mini-chart__bar {
+    flex: 1;
+    min-height: 6px;
+    border-radius: 4px 4px 0 0;
+    transition: opacity 0.15s;
+    cursor: help;
+}
+
+.calibration-mini-chart__bar--high { background: var(--accent-green); }
+.calibration-mini-chart__bar--partial { background: #ffbb44; }
+.calibration-mini-chart__bar--low { background: #ff8080; }
+.calibration-mini-chart__bar--unknown { background: rgba(255,255,255,0.15); }
+
+.calibration-needs-more {
+    text-align: center;
+    color: var(--text-secondary);
+    font-style: italic;
+    padding: 1rem;
+}
+
+/* Delimitador de objetivos vagos (Fase B3 SRL).
+   Aparece bajo el input de objetivo si el usuario tipeó algo corto/vago.
+   Los chips son sugerencias de preguntas; clickear expande la pregunta
+   en el input para que el usuario responda inline. */
+.objective-delimit {
+    margin-top: 0.55rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.65rem 0.75rem;
+    background: rgba(0, 255, 65, 0.04);
+    border: 1px dashed rgba(0, 255, 65, 0.25);
+    border-radius: 8px;
+}
+
+.objective-delimit.hidden { display: none; }
+
+.objective-delimit__label {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+.objective-delimit__chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+}
+
+.objective-delimit-chip {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    padding: 0.35rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    text-align: left;
+}
+
+.objective-delimit-chip:hover {
+    background: rgba(0,255,65,0.12);
+    border-color: rgba(0,255,65,0.45);
+    color: var(--accent-green);
+}
+
+.objective-delimit__status--loading { color: var(--accent-green); }
+.objective-delimit__status--error { color: #ff8080; }
+
+/* Self-Evaluation modal (Fase A del reposicionamiento SRL).
+   Aparece tras "Analizar Grabación" para que el pianista prediga.
+   Diseño alineado con confirm-modal pero más ancho porque tiene form. */
+.self-eval-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.72);
+    backdrop-filter: blur(4px);
+    z-index: 20500;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: confirmFadeIn 0.18s ease;
+    padding: 1rem;
+}
+
+.self-eval-overlay.hidden { display: none; }
+
+.self-eval-box {
+    background: var(--bg-secondary);
+    border: 1px solid rgba(0,255,65,0.28);
+    border-radius: 16px;
+    padding: 1.5rem 1.75rem;
+    max-width: 480px;
+    width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: 0 24px 70px rgba(0,0,0,0.65), 0 0 0 1px rgba(0,255,65,0.08);
+    animation: confirmSlideIn 0.22s ease;
+}
+
+.self-eval-header {
+    margin-bottom: 1.25rem;
+}
+
+.self-eval-header h3 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.15rem;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.self-eval-subtitle {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+.self-eval-field {
+    margin-bottom: 1.25rem;
+}
+
+.self-eval-field label,
+.self-eval-label {
+    display: block;
+    font-size: 0.88rem;
+    color: var(--text-primary);
+    font-weight: 500;
+    margin-bottom: 0.55rem;
+}
+
+.self-eval-rating {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.self-eval-rating input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent-green);
+}
+
+.self-eval-rating-scale {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    padding: 0 2px;
+}
+
+.self-eval-rating-value {
+    align-self: flex-end;
+    font-size: 0.85rem;
+    color: var(--accent-green);
+    font-weight: 600;
+}
+
+.self-eval-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+
+.self-eval-chip {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    padding: 0.4rem 0.85rem;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.self-eval-chip:hover {
+    background: rgba(255,255,255,0.08);
+    color: var(--text-primary);
+}
+
+.self-eval-chip.is-active {
+    background: rgba(0,255,65,0.14);
+    border-color: rgba(0,255,65,0.5);
+    color: var(--accent-green);
+}
+
+.self-eval-field textarea {
+    width: 100%;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    padding: 0.6rem 0.75rem;
+    font-family: inherit;
+    font-size: 0.9rem;
+    line-height: 1.4;
+    resize: vertical;
+    min-height: 3.2em;
+    transition: border-color 0.15s;
+}
+
+.self-eval-field textarea:focus {
+    outline: none;
+    border-color: rgba(0,255,65,0.5);
+}
+
+.self-eval-hint {
+    display: block;
+    text-align: right;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    margin-top: 0.25rem;
+}
+
+.self-eval-actions {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-top: 1.5rem;
+}
+
+.self-eval-btn {
+    padding: 0.55rem 1.4rem;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.18s, transform 0.12s;
+}
+
+.self-eval-btn:active { transform: scale(0.97); }
+
+.self-eval-btn--skip {
+    background: transparent;
+    border-color: var(--border-color);
+    color: var(--text-secondary);
+}
+
+.self-eval-btn--skip:hover {
+    background: rgba(255,255,255,0.06);
+    color: var(--text-primary);
+}
+
+.self-eval-btn--go {
+    background: rgba(0,255,65,0.14);
+    border-color: rgba(0,255,65,0.45);
+    color: var(--accent-green);
+    flex: 1;
+    max-width: 220px;
+}
+
+.self-eval-btn--go:hover {
+    background: rgba(0,255,65,0.24);
+}
+
+@media (max-width: 480px) {
+    .self-eval-box { padding: 1.25rem 1rem; }
+    .self-eval-actions { flex-direction: column-reverse; }
+    .self-eval-btn--go { max-width: none; width: 100%; }
+    .self-eval-btn--skip { width: 100%; }
 }
 
 /* Toasts (unified notification system — ver assets/js/modules/Toast.js) */

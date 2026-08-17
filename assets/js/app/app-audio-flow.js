@@ -75,6 +75,146 @@ export const audioFlowMixin = {
         return stored !== false;
     },
 
+    // "Lo que estás haciendo bien" — bullets simples con checkmark, máx 2.
+    // Oculta la sección si el LLM no aportó fortalezas (mejor no mostrar que
+    // forzar un "bien hecho" genérico — ver REGLA 8).
+    _renderStrengths(strengths) {
+        const section = document.getElementById('analysis-strengths-section');
+        const list = document.getElementById('analysis-strengths-list');
+        if (!section || !list) return;
+        const items = Array.isArray(strengths)
+            ? strengths.filter(s => typeof s === 'string' && s.trim())
+            : [];
+        if (!items.length) {
+            section.classList.add('hidden');
+            list.innerHTML = '';
+            return;
+        }
+        list.innerHTML = items.slice(0, 2).map(s => `
+            <li class="analysis-strength-item">
+                <i class="fas fa-check-circle" aria-hidden="true"></i>
+                <span>${escapeHtml(s)}</span>
+            </li>
+        `).join('');
+        section.classList.remove('hidden');
+    },
+
+    // "Tu oído vs los datos" — Fase A SRL. Aparece SOLO si vino autoevaluación
+    // previa y el modelo llenó beliefVsDetection (REGLA 10). Si el usuario saltó
+    // el modal o el modelo no llenó el campo, la sección queda oculta.
+    _renderBeliefVsDetection(text) {
+        const section = document.getElementById('analysis-belief-section');
+        const el = document.getElementById('analysis-belief-text');
+        if (!section || !el) return;
+        const t = String(text || '').trim();
+        if (!t) {
+            section.classList.add('hidden');
+            el.textContent = '';
+            return;
+        }
+        el.textContent = t;
+        section.classList.remove('hidden');
+    },
+
+    // Pregunta metacognitiva final — Fase A SRL (REGLA 11). Es lo último que
+    // ve el pianista; provoca reflexión, no cierra el análisis.
+    _renderMetacognitiveQuestion(text) {
+        const section = document.getElementById('analysis-metaq-section');
+        const el = document.getElementById('analysis-metaq-text');
+        if (!section || !el) return;
+        const t = String(text || '').trim();
+        if (!t) {
+            section.classList.add('hidden');
+            el.textContent = '';
+            return;
+        }
+        el.textContent = t;
+        section.classList.remove('hidden');
+    },
+
+    // "Tu principal foco" — 1 sola línea destacada. Formulada como oportunidad
+    // por REGLA 9 (no diagnóstico). Oculta si viene vacío del LLM.
+    _renderPrimaryFocus(text) {
+        const section = document.getElementById('analysis-primary-focus-section');
+        const el = document.getElementById('analysis-primary-focus-text');
+        if (!section || !el) return;
+        const t = String(text || '').trim();
+        if (!t) {
+            section.classList.add('hidden');
+            el.textContent = '';
+            return;
+        }
+        el.textContent = t;
+        section.classList.remove('hidden');
+    },
+
+    // Ejercicio de esta semana — nuevo formato structured (steps + checkQuestion)
+    // con back-compat total a description prosa (respuestas históricas).
+    _renderPracticeExercise(exercise) {
+        const el = document.getElementById('practice-suggestions');
+        if (!el) return;
+        if (!exercise || typeof exercise !== 'object') {
+            el.innerHTML = '<p class="no-data">Sin ejercicio recomendado.</p>';
+            return;
+        }
+
+        const title = String(exercise.title || '').trim();
+        const dur = Number(exercise.durationMin);
+        const durationBadge = Number.isFinite(dur) && dur > 0
+            ? `<span class="suggestion-duration"><i class="fas fa-clock"></i> ${Math.round(dur)} min</span>`
+            : '';
+
+        const stepsArr = Array.isArray(exercise.steps)
+            ? exercise.steps.filter(s => typeof s === 'string' && s.trim())
+            : [];
+        const checkQ = String(exercise.checkQuestion || '').trim();
+        const desc = String(exercise.description || '').trim();
+
+        // Preferimos el formato nuevo (steps + checkQuestion) si vinieron; si
+        // no, caemos a la prosa description del schema histórico.
+        let body;
+        if (stepsArr.length) {
+            const stepsHtml = stepsArr.slice(0, 4)
+                .map(s => `<li>${escapeHtml(s)}</li>`)
+                .join('');
+            const checkHtml = checkQ
+                ? `<div class="exercise-check">
+                       <span class="exercise-check__label">Qué comprobar</span>
+                       <p class="exercise-check__question">${escapeHtml(checkQ)}</p>
+                   </div>`
+                : '';
+            body = `
+                <div class="exercise-steps">
+                    <span class="exercise-steps__label">Qué hacer</span>
+                    <ol class="exercise-steps__list">${stepsHtml}</ol>
+                </div>
+                ${checkHtml}
+            `;
+        } else if (desc) {
+            // Back-compat: prosa description del schema viejo. Limpiar bullets
+            // sueltos que el LLM haya escapado dentro del string.
+            const cleaned = desc.split(/\r?\n/)
+                .map(l => l.replace(/^\s*(?:[-*•·▪●]|\d+[.)])\s+/, '').trim())
+                .filter(Boolean)
+                .join(' ');
+            body = `<div class="suggestion-description">${escapeHtml(cleaned)}</div>`;
+        } else {
+            el.innerHTML = '<p class="no-data">Sin ejercicio recomendado.</p>';
+            return;
+        }
+
+        el.innerHTML = `
+            <div class="suggestion-card">
+                <div class="suggestion-title">
+                    <i class="fas fa-star"></i>
+                    ${escapeHtml(title)}
+                    ${durationBadge}
+                </div>
+                ${body}
+            </div>
+        `;
+    },
+
     // Render de la sección "Observaciones estructuradas" — un card por cada
     // observación del LLM, con las tres capas explícitas (dato/interpretación/
     // recomendación). Refuerza visualmente la REGLA 7 del prompt: el pianista
@@ -93,12 +233,21 @@ export const audioFlowMixin = {
         }
 
         const confidenceLabel = { high: 'alta', medium: 'media', low: 'baja' };
-        list.innerHTML = items.map((o) => {
+        // Rejections previas del usuario — se marcan visualmente y el botón
+        // cambia a "rechazada". No dejamos que las oculten (feedback visual sano),
+        // pero se guardan y el próximo prompt las evita (ver AIAnalysisEngine).
+        const rejected = this.getObservationRejections();
+        list.innerHTML = items.map((o, idx) => {
             const conf = ['high', 'medium', 'low'].includes(o.confidence) ? o.confidence : 'medium';
+            const hash = this._observationHash(o);
+            const isRejected = rejected.some(r => r.hash === hash);
             return `
-                <article class="layered-obs layered-obs--${conf}">
+                <article class="layered-obs layered-obs--${conf} ${isRejected ? 'is-rejected' : ''}" data-obs-idx="${idx}" data-obs-hash="${escapeHtml(hash)}">
                     <header class="layered-obs__header">
                         <span class="layered-obs__confidence">confianza: ${confidenceLabel[conf]}</span>
+                        <button type="button" class="layered-obs__reject-btn" data-action="reject-obs" data-obs-idx="${idx}" title="${isRejected ? 'Ya rechazaste esta observación' : 'Marcar como no aplica'}" aria-label="Marcar observación como no aplica">
+                            ${isRejected ? '<i class="fas fa-ban" aria-hidden="true"></i> rechazada' : '<i class="fas fa-circle-xmark" aria-hidden="true"></i> no aplica'}
+                        </button>
                     </header>
                     <div class="layered-obs__row layered-obs__row--fact">
                         <span class="layered-obs__tag">Dato</span>
@@ -112,10 +261,93 @@ export const audioFlowMixin = {
                         <span class="layered-obs__tag">Recomendación</span>
                         <p class="layered-obs__text">${escapeHtml(String(o.recommendation || ''))}</p>
                     </div>
+                    <div class="layered-obs__reject-form hidden" data-obs-idx="${idx}">
+                        <label for="obs-reject-reason-${idx}">¿Por qué no aplica? (opcional — ayuda a que no se repita)</label>
+                        <textarea id="obs-reject-reason-${idx}" rows="2" maxlength="200" placeholder="Ej: mi piano tiene el registro grave apagado, no es decisión mía"></textarea>
+                        <div class="layered-obs__reject-actions">
+                            <button type="button" class="layered-obs__reject-cancel" data-action="reject-obs-cancel" data-obs-idx="${idx}">Cancelar</button>
+                            <button type="button" class="layered-obs__reject-confirm" data-action="reject-obs-confirm" data-obs-idx="${idx}">Confirmar rechazo</button>
+                        </div>
+                    </div>
                 </article>
             `;
         }).join('');
+
+        // Delegación: un solo listener por render (idempotente porque reemplazamos innerHTML entero).
+        list.onclick = (ev) => {
+            const btn = ev.target.closest('[data-action]');
+            if (!btn) return;
+            const action = btn.getAttribute('data-action');
+            const idx = Number(btn.getAttribute('data-obs-idx'));
+            const article = list.querySelector(`article[data-obs-idx="${idx}"]`);
+            if (!article) return;
+            if (action === 'reject-obs') {
+                if (article.classList.contains('is-rejected')) return;
+                const form = article.querySelector('.layered-obs__reject-form');
+                form?.classList.toggle('hidden');
+                setTimeout(() => form?.querySelector('textarea')?.focus(), 40);
+            } else if (action === 'reject-obs-cancel') {
+                article.querySelector('.layered-obs__reject-form')?.classList.add('hidden');
+            } else if (action === 'reject-obs-confirm') {
+                const reason = article.querySelector('textarea')?.value?.trim() || '';
+                const hash = article.getAttribute('data-obs-hash') || '';
+                const obsData = items[idx] || {};
+                this.recordObservationRejection({
+                    hash,
+                    fact: String(obsData.fact || '').slice(0, 200),
+                    interpretation: String(obsData.interpretation || '').slice(0, 200),
+                    reason: reason.slice(0, 200),
+                    timestamp: Date.now(),
+                });
+                article.classList.add('is-rejected');
+                article.querySelector('.layered-obs__reject-form')?.classList.add('hidden');
+                const rejectBtn = article.querySelector('[data-action="reject-obs"]');
+                if (rejectBtn) {
+                    rejectBtn.innerHTML = '<i class="fas fa-ban" aria-hidden="true"></i> rechazada';
+                    rejectBtn.title = 'Ya rechazaste esta observación';
+                }
+                this.showNotification('Rechazo guardado — no volverá a aparecer', 'success');
+            }
+        };
+
         section.classList.remove('hidden');
+    },
+
+    // Hash simple para identificar una observation entre sesiones. Toma el
+    // primer chunk del fact + interpretation, normaliza (lowercase + trim),
+    // suficiente para dedup exacto y "casi-exacto" del mismo tema (el modelo
+    // varía redacción pero mantiene el punto central).
+    _observationHash(o) {
+        const raw = `${String(o?.fact || '')}::${String(o?.interpretation || '')}`
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 160);
+        // Hash djb2 corto para llave estable (32 chars hex).
+        let hash = 5381;
+        for (let i = 0; i < raw.length; i++) {
+            hash = ((hash << 5) + hash) + raw.charCodeAt(i);
+            hash = hash & 0xffffffff;
+        }
+        return `${(hash >>> 0).toString(16)}_${raw.slice(0, 40).replace(/[^a-z0-9]+/g, '')}`;
+    },
+
+    // Storage de rechazos — por usuario. Cap 40 para que no crezca infinito;
+    // los más viejos se descartan cuando se pasa (FIFO), así el modelo no
+    // recibe una biblioteca gigante en cada prompt.
+    getObservationRejections() {
+        const arr = this.safeGetLocalStorage(this.userKey('pianostudy-obs-rejections'), []);
+        return Array.isArray(arr) ? arr : [];
+    },
+
+    recordObservationRejection(entry) {
+        if (!entry || !entry.hash) return;
+        let list = this.getObservationRejections();
+        // Dedup por hash — si ya existe, actualizamos motivo/timestamp.
+        list = list.filter(r => r.hash !== entry.hash);
+        list.unshift(entry);
+        if (list.length > 40) list = list.slice(0, 40);
+        this.safeSetLocalStorage(this.userKey('pianostudy-obs-rejections'), list);
     },
 
     // Panel "IAs y motores usados" — colapsable, plegado por defecto (per user
@@ -266,6 +498,187 @@ export const audioFlowMixin = {
         return rec?.blob instanceof Blob ? rec.blob : null;
     },
 
+    // Fase B3 SRL: heurística para saber si un objetivo escrito por el usuario
+    // es "vago" y merece la miniconsulta de delimitación. Vago = corto Y sin
+    // marcadores de especificidad (BPM, compás, tune concreto, mano).
+    _objectiveIsVague(text) {
+        const t = String(text || '').trim();
+        if (t.length < 4) return false;         // demasiado corto — está tipeando aún
+        if (t.length > 90) return false;        // ya es específico si dice tanto
+        const specific = /\b\d+\s*(bpm|compás|compases|comp\.|tempo)|\bcompás\s*\d+|\ba\s*\d+\s*bpm|mano\s*(derecha|izquierda)|(m\.?d\.?|m\.?i\.?)\b/i;
+        if (specific.test(t)) return false;
+        return true;
+    },
+
+    // Fase B3 SRL: dispara la miniconsulta a Groq/Gemini si el objetivo es vago.
+    // Debouncable — el llamador maneja el timer. Cachea el último objetivo
+    // consultado para no repetir requests idénticos mientras el usuario tipea.
+    async maybeDelimitObjective(rawText) {
+        const container = document.getElementById('objective-delimit-container');
+        const chipsEl = document.getElementById('objective-delimit-chips');
+        const statusEl = document.getElementById('objective-delimit-status');
+        if (!container || !chipsEl || !statusEl) return;
+
+        const text = String(rawText || '').trim();
+        if (!this._objectiveIsVague(text)) {
+            container.classList.add('hidden');
+            chipsEl.innerHTML = '';
+            this._lastDelimitedObjective = null;
+            return;
+        }
+        if (text === this._lastDelimitedObjective) return;
+        this._lastDelimitedObjective = text;
+
+        // Estado "buscando" — le da feedback al usuario mientras espera Groq.
+        container.classList.remove('hidden');
+        chipsEl.innerHTML = '';
+        statusEl.textContent = '🔎 Buscando preguntas para afinar el objetivo…';
+        statusEl.className = 'objective-delimit__label objective-delimit__status--loading';
+
+        try {
+            const aiEngine = this.aiEngine || new (await import('../modules/AIAnalysisEngine.js')).AIAnalysisEngine();
+            if (!this.aiEngine) this.aiEngine = aiEngine;
+            const style = (document.getElementById('analysis-style')?.value || '').trim();
+            const level = (document.getElementById('analysis-level')?.value || '').trim();
+            const questions = await aiEngine.delimitObjective(text, { style, level });
+            if (!Array.isArray(questions) || questions.length === 0) {
+                // Silencio en caso de vacío: mejor no mostrar chips huecas.
+                container.classList.add('hidden');
+                return;
+            }
+            // Si el usuario mientras tanto cambió el texto y ya no es vago, abortamos.
+            const currentText = document.getElementById('analysis-objective')?.value?.trim() || '';
+            if (currentText !== text) return;
+
+            statusEl.textContent = '🔎 Para afinar tu objetivo (clickeá una pregunta para agregarla):';
+            statusEl.className = 'objective-delimit__label';
+            chipsEl.innerHTML = questions.map((q, i) => `
+                <button type="button" class="objective-delimit-chip" data-q-idx="${i}">${escapeHtml(q)}</button>
+            `).join('');
+            chipsEl.onclick = (ev) => {
+                const btn = ev.target.closest('[data-q-idx]');
+                if (!btn) return;
+                const idx = Number(btn.getAttribute('data-q-idx'));
+                const question = questions[idx];
+                if (!question) return;
+                const input = document.getElementById('analysis-objective');
+                if (!input) return;
+                // Concatena la pregunta al objetivo actual como marca a completar.
+                // El usuario tiene que responder inline en el mismo input.
+                const current = input.value.trim();
+                const separator = current && !current.endsWith('.') && !current.endsWith('—') ? ' — ' : ' ';
+                input.value = `${current}${separator}${question}`.slice(0, 140);
+                input.focus();
+                // Después de responder cambia el texto y disparará blur/input de nuevo.
+            };
+        } catch (err) {
+            console.warn('delimitObjective falló:', err);
+            container.classList.add('hidden');
+        }
+    },
+
+    // Fase A del reposicionamiento SRL: modal previo al análisis que le pide
+    // al pianista una predicción (rating 1-5, área más floja, hipótesis libre).
+    // Todos opcionales; el botón "Saltar por hoy" resuelve con null y el pipeline
+    // sigue igual que hoy. Si el pianista completa algo, se pasa a analyzePerformance
+    // y el modelo llena la sección beliefVsDetection contrastando lo que dijo el
+    // pianista con lo que detectan los datos (REGLA 10 del prompt).
+    promptSelfEvaluation() {
+        return new Promise((resolve) => {
+            const overlay = document.getElementById('self-eval-modal');
+            const ratingInput = document.getElementById('self-eval-rating');
+            const ratingOut = document.getElementById('self-eval-rating-value');
+            const predictionInput = document.getElementById('self-eval-prediction');
+            const predictionCount = document.getElementById('self-eval-prediction-count');
+            const chips = Array.from(overlay?.querySelectorAll('.self-eval-chip') || []);
+            const submitBtn = document.getElementById('self-eval-submit');
+            const skipBtn = document.getElementById('self-eval-skip');
+
+            if (!overlay || !ratingInput || !submitBtn || !skipBtn) {
+                // Si por alguna razón el modal no está en el DOM, no bloqueamos:
+                // seguimos como antes sin autoevaluación.
+                resolve(null);
+                return;
+            }
+
+            // Reset a valores neutros por si abrimos el modal más de una vez en la sesión.
+            ratingInput.value = '3';
+            if (ratingOut) ratingOut.textContent = '3/5';
+            if (predictionInput) predictionInput.value = '';
+            if (predictionCount) predictionCount.textContent = '0 / 200';
+            chips.forEach(c => {
+                c.classList.remove('is-active');
+                c.setAttribute('aria-checked', 'false');
+            });
+            let selectedChip = '';
+
+            const onRatingInput = () => {
+                if (ratingOut) ratingOut.textContent = `${ratingInput.value}/5`;
+            };
+            const onPredictionInput = () => {
+                const len = predictionInput?.value?.length || 0;
+                if (predictionCount) predictionCount.textContent = `${len} / 200`;
+            };
+            const onChipClick = (ev) => {
+                const btn = ev.currentTarget;
+                const val = btn.getAttribute('data-value') || '';
+                // Toggle: si el mismo chip está activo, deseleccionar (permite dejarlo en blanco).
+                if (selectedChip === val) {
+                    selectedChip = '';
+                    btn.classList.remove('is-active');
+                    btn.setAttribute('aria-checked', 'false');
+                    return;
+                }
+                selectedChip = val;
+                chips.forEach(c => {
+                    const isActive = c === btn;
+                    c.classList.toggle('is-active', isActive);
+                    c.setAttribute('aria-checked', isActive ? 'true' : 'false');
+                });
+            };
+            const onKeydown = (ev) => {
+                if (ev.key === 'Escape') { cleanup(); resolve(null); }
+            };
+
+            const cleanup = () => {
+                overlay.classList.add('hidden');
+                ratingInput.removeEventListener('input', onRatingInput);
+                predictionInput?.removeEventListener('input', onPredictionInput);
+                chips.forEach(c => c.removeEventListener('click', onChipClick));
+                submitBtn.removeEventListener('click', onSubmit);
+                skipBtn.removeEventListener('click', onSkip);
+                document.removeEventListener('keydown', onKeydown);
+            };
+
+            const onSubmit = () => {
+                const rating = Number(ratingInput.value);
+                const prediction = (predictionInput?.value || '').trim();
+                const result = {
+                    rating: Number.isFinite(rating) ? rating : null,
+                    weakArea: selectedChip || null,
+                    prediction: prediction || null,
+                    timestamp: Date.now(),
+                };
+                // Si el usuario no tocó nada útil (rating neutro y todo vacío),
+                // tratamos como "saltar" para no meter ruido al prompt.
+                const meaningful = result.weakArea || result.prediction || (Number.isFinite(rating) && rating !== 3);
+                cleanup();
+                resolve(meaningful ? result : null);
+            };
+            const onSkip = () => { cleanup(); resolve(null); };
+
+            ratingInput.addEventListener('input', onRatingInput);
+            predictionInput?.addEventListener('input', onPredictionInput);
+            chips.forEach(c => c.addEventListener('click', onChipClick));
+            submitBtn.addEventListener('click', onSubmit);
+            skipBtn.addEventListener('click', onSkip);
+            document.addEventListener('keydown', onKeydown);
+
+            overlay.classList.remove('hidden');
+            setTimeout(() => predictionInput?.focus(), 60);
+        });
+    },
+
     async startAnalysis() {
         const select = document.getElementById('analysis-recording-select');
         const selection = String(select?.value || '');
@@ -276,6 +689,10 @@ export const audioFlowMixin = {
             this.showNotification('Grabación no encontrada', 'error');
             return;
         }
+
+        // Fase A SRL: pedir autoevaluación previa (opcional).
+        // Si el usuario salta, selfEval === null y el análisis funciona igual que antes.
+        const selfEval = await this.promptSelfEvaluation();
 
         const statusEl = document.getElementById('analysis-status');
         const resultsEl = document.getElementById('analysis-results');
@@ -346,12 +763,19 @@ export const audioFlowMixin = {
             // sin llamadas extra a la IA. Le da al análisis nuevo continuidad con las
             // sesiones previas — la IA sabe qué le venías comentando y qué ejercicios
             // ya le recomendó, así no repite lo mismo cada vez.
-            const studentMemory = AIAnalysisEngine.buildStudentMemory(this.analysisHistory);
+            // Fase B2: incluir las observations que el pianista rechazó explícitamente
+            // para que el prompt no las repita (el bloque aparece dentro de
+            // CONTEXTO DEL ESTUDIANTE).
+            const studentMemory = AIAnalysisEngine.buildStudentMemory(
+                this.analysisHistory,
+                { rejections: this.getObservationRejections() },
+            );
 
             const aiAnalysis = await aiEngine.analyzePerformance(
                 audioAnalysis, metadata, studentMemory,
                 auditoryLayer?.observations || null,
                 reliability,
+                selfEval,
             );
             this.updateAnalysisProgress(100);
 
@@ -362,6 +786,7 @@ export const audioFlowMixin = {
                 aiAnalysis,
                 auditoryLayer,
                 reliability,
+                selfEvaluation: selfEval,
                 geminiRequested: geminiOn,
                 timestamp: Date.now()
             };
@@ -493,43 +918,25 @@ export const audioFlowMixin = {
                 : '<p class="no-data">Sin análisis disponible.</p>';
         }
 
+        // Lo que estás haciendo bien — máx 2 puntos concretos (schema REGLA 8).
+        this._renderStrengths(aiAnalysis?.strengths || []);
+
+        // Tu oído vs los datos — Fase A SRL. Aparece solo si vino self-eval y
+        // el modelo llenó beliefVsDetection (REGLA 10).
+        this._renderBeliefVsDetection(aiAnalysis?.beliefVsDetection || '');
+
         // Observaciones en tres niveles (REGLA 7 del prompt): fact → interpretation
         // → recommendation. Sección visible solo si el LLM devolvió al menos una;
         // si no pudo articular ninguna con las tres capas honestas, no aparece
         // (mejor no mostrar que forzar prosa vacía).
         this._renderLayeredObservations(aiAnalysis?.observations || []);
 
-        const sugEl = document.getElementById('practice-suggestions');
-        if (sugEl) {
-            // Nuevo schema: practiceExercise (uno solo). Compat: practiceSuggestions (array).
-            const single = aiAnalysis?.practiceExercise;
-            const arr = single && typeof single === 'object'
-                ? [single]
-                : (Array.isArray(aiAnalysis?.practiceSuggestions) ? aiAnalysis.practiceSuggestions : []);
-            const clean = (text) => String(text || '')
-                .split(/\r?\n/)
-                .map(l => l.replace(/^\s*(?:[-*•·▪●]|\d+[.)])\s+/, '').trim())
-                .filter(Boolean)
-                .join(' ');
-            sugEl.innerHTML = arr.map(s => {
-                const dur = Number(s?.durationMin);
-                const durationBadge = Number.isFinite(dur) && dur > 0
-                    ? `<span class="suggestion-duration"><i class="fas fa-clock"></i> ${Math.round(dur)} min</span>`
-                    : '';
-                return `
-                <div class="suggestion-card">
-                    <div class="suggestion-title">
-                        <i class="fas fa-star"></i>
-                        ${escapeHtml(s?.title || '')}
-                        ${durationBadge}
-                    </div>
-                    <div class="suggestion-description">
-                        ${escapeHtml(clean(s?.description))}
-                    </div>
-                </div>
-                `;
-            }).join('') || '<p class="no-data">Sin ejercicio recomendado.</p>';
-        }
+        // Tu principal foco — puente narrativo hacia el ejercicio (REGLA 8).
+        // Se renderiza JUSTO antes del ejercicio (orden del DOM), sin repetir
+        // lo que dice el ejercicio ni musicalAnalysis ni observations.
+        this._renderPrimaryFocus(aiAnalysis?.primaryFocus || '');
+
+        this._renderPracticeExercise(aiAnalysis?.practiceExercise);
 
         // Objetivo próxima sesión — se muestra solo si vino del modelo. Se conecta
         // con la memoria del estudiante en el próximo análisis (el modelo verá
@@ -546,6 +953,10 @@ export const audioFlowMixin = {
                 nextGoalText.textContent = '';
             }
         }
+
+        // Pregunta metacognitiva final — Fase A SRL (REGLA 11). Es lo último
+        // que ve el pianista antes del reproductor y el chat.
+        this._renderMetacognitiveQuestion(aiAnalysis?.metacognitiveQuestion || '');
 
         // Reproductor WaveSurfer con regiones para los momentos que marcó la IA.
         this._initAnalysisWavesurfer();
@@ -691,6 +1102,7 @@ export const audioFlowMixin = {
         this.analysisHistory.unshift(this.currentAnalysis);
         this.safeSetLocalStorage(this.userKey('pianostudy-analysis-history'), this.analysisHistory);
         this.renderAnalysisHistory();
+        this.renderCalibrationPanel();
         this.persistCurrentAnalysisAudio();
         this.showNotification('Análisis guardado', 'success');
     },
@@ -699,11 +1111,98 @@ export const audioFlowMixin = {
         if (!this.getActiveUsername()) {
             this.analysisHistory = [];
             this.renderAnalysisHistory();
+            this.renderCalibrationPanel();
             return;
         }
         const stored = this.safeGetLocalStorage(this.userKey('pianostudy-analysis-history'), []);
         this.analysisHistory = Array.isArray(stored) ? stored : [];
         this.renderAnalysisHistory();
+        this.renderCalibrationPanel();
+    },
+
+    // Fase B1 SRL: renderiza el panel "Cómo mejora tu oído".
+    // Se oculta completamente si el usuario aún no tiene 2+ sesiones con
+    // autoevaluación (no queremos mostrar el panel vacío o con "faltan datos"
+    // como intro — mejor invisible hasta que aporta).
+    renderCalibrationPanel() {
+        const panel = document.getElementById('analysis-calibration-panel');
+        const body = document.getElementById('analysis-calibration-body');
+        const toggle = document.getElementById('analysis-calibration-toggle');
+        const content = document.getElementById('analysis-calibration-content');
+        if (!panel || !body || !toggle || !content) return;
+
+        const list = Array.isArray(this.analysisHistory) ? this.analysisHistory : [];
+        const entries = list
+            .filter(a => a?.selfEvaluation && typeof a.selfEvaluation === 'object')
+            .map(a => AIAnalysisEngine._computeCalibrationEntry(a))
+            .filter(Boolean);
+
+        if (entries.length < 2) {
+            // Con <2 sesiones el panel no aporta. Ocultarlo por completo.
+            panel.classList.add('hidden');
+            body.classList.add('hidden');
+            toggle.setAttribute('aria-expanded', 'false');
+            toggle.textContent = 'Mostrar';
+            return;
+        }
+
+        panel.classList.remove('hidden');
+
+        const summary = AIAnalysisEngine.computeCalibrationSummary(entries);
+        if (!summary || !summary.hasData) {
+            content.innerHTML = `<p class="calibration-needs-more">Necesitás al menos 2 sesiones con autoevaluación para ver la calibración.</p>`;
+        } else {
+            const trendCls = `calibration-trend--${summary.trend}`;
+            const trendCopy = {
+                mejorando: `📈 Tu oído se está acercando al análisis (${summary.deltaPct > 0 ? '+' : ''}${summary.deltaPct}% vs sesiones anteriores).`,
+                bajando: `📉 Tu autoevaluación se está alejando del análisis (${summary.deltaPct}% vs sesiones anteriores). Puede ser natural mientras probás cosas nuevas.`,
+                estable: `➖ Tu autoevaluación se mantiene estable respecto del análisis.`,
+            }[summary.trend] || '';
+
+            const barsHtml = summary.recentEntries.map((e) => {
+                const cls = `calibration-mini-chart__bar--${e.ratingConvergence || 'unknown'}`;
+                const height = e.ratingConvergence === 'high' ? '100%'
+                    : e.ratingConvergence === 'partial' ? '60%'
+                    : e.ratingConvergence === 'low' ? '30%'
+                    : '15%';
+                const label = e.ratingConvergence === 'high' ? 'Convergencia alta'
+                    : e.ratingConvergence === 'partial' ? 'Convergencia parcial'
+                    : e.ratingConvergence === 'low' ? 'Convergencia baja'
+                    : 'Sin datos suficientes';
+                return `<div class="calibration-mini-chart__bar ${cls}" style="height: ${height};" title="${escapeHtml(label)} — ${new Date(e.timestamp).toLocaleDateString()}"></div>`;
+            }).join('');
+
+            content.innerHTML = `
+                <div class="calibration-stats">
+                    <div class="calibration-stat">
+                        <div class="calibration-stat__value">${summary.highConvergencePct}%</div>
+                        <span class="calibration-stat__label">Tu oído acierta</span>
+                    </div>
+                    <div class="calibration-stat">
+                        <div class="calibration-stat__value">${summary.areaMatchPct}%</div>
+                        <span class="calibration-stat__label">Área que identificaste</span>
+                    </div>
+                    <div class="calibration-stat">
+                        <div class="calibration-stat__value">${summary.totalSessions}</div>
+                        <span class="calibration-stat__label">Sesiones con auto-eval</span>
+                    </div>
+                </div>
+                <div class="calibration-trend ${trendCls}">${escapeHtml(trendCopy)}</div>
+                <div>
+                    <span class="calibration-stat__label" style="display:block; margin-bottom: 0.35rem;">Últimas ${summary.recentEntries.length} sesiones (verde = tu evaluación coincidió con los datos)</span>
+                    <div class="calibration-mini-chart">${barsHtml}</div>
+                </div>
+            `;
+        }
+
+        // Toggle listener (idempotente — reemplazamos handler cada render).
+        toggle.onclick = () => {
+            const expanded = toggle.getAttribute('aria-expanded') === 'true';
+            const next = !expanded;
+            toggle.setAttribute('aria-expanded', String(next));
+            toggle.textContent = next ? 'Ocultar' : 'Mostrar';
+            body.classList.toggle('hidden', !next);
+        };
     },
 
     renderAnalysisHistory() {

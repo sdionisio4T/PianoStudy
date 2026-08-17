@@ -71,6 +71,21 @@ export const uiMixin = {
         document.getElementById('start-analysis-btn')?.addEventListener('click', () => {
             this.startAnalysis();
         });
+
+        // Fase B3 SRL: delimitador de objetivos vagos.
+        // Listener con debounce sobre el input; si el objetivo es vago, dispara
+        // la miniconsulta a Groq y renderiza chips. Blur también dispara por si
+        // el usuario terminó de escribir sin pausar.
+        const objectiveInput = document.getElementById('analysis-objective');
+        if (objectiveInput) {
+            let debounceTimer = null;
+            const triggerDelimit = () => {
+                clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(() => this.maybeDelimitObjective(objectiveInput.value), 700);
+            };
+            objectiveInput.addEventListener('input', triggerDelimit);
+            objectiveInput.addEventListener('blur', () => this.maybeDelimitObjective(objectiveInput.value));
+        }
         document.getElementById('save-analysis-btn')?.addEventListener('click', () => {
             this.saveAnalysis();
         });
