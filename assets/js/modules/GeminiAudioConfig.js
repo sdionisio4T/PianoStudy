@@ -35,17 +35,35 @@ export const GEMINI_AUDIO_CONFIG = {
     minSignalRms: 0.005,
 
     // Llamada al proxy ───────────────────────────────────────────────────────
-    // 'gemini-flash-latest' es el alias vivo que Google mantiene apuntando al
-    // mejor flash disponible para keys nuevas. Descubrimos por la mala que los
-    // pines antiguos (1.5-flash-latest, 2.0-flash, 2.5-flash) se cierran para
-    // keys nuevas sin previo aviso — el alias nos protege de esa rotación.
-    // Alternativas si querés pinear: 'gemini-3.5-flash' (baseline estable) o
-    // 'gemini-flash-lite-latest' (más barato). Ver la salida completa de
-    // ListModels con tu key: v1beta/models?key=... (retorna paginado).
-    modelName: 'gemini-flash-latest',
+    // Rotación entre modelos con cuota diaria separada. Cada modelo del free
+    // tier de Google tiene su propio contador (~500 req/día), así que probar
+    // varios en orden multiplica la capacidad total sin comprar plan.
+    //
+    // Lógica en el analyzer:
+    //   - se prueba el primero; si devuelve 429/403 con quota → siguiente
+    //     modelo INMEDIATAMENTE (no reintenta el mismo).
+    //   - errores transitorios (503, 500, timeout) → reintenta el mismo modelo
+    //     antes de pasar al siguiente.
+    //   - si TODOS fallan → null (fallback silencioso, como siempre).
+    //
+    // El orden es de más capaz/costoso a más barato — así usamos el bueno
+    // hasta agotarlo, después bajamos calidad. Los pines pueden desaparecer
+    // sin aviso para keys nuevas, por eso al final va un alias que Google
+    // mantiene vivo apuntando al mejor flash disponible.
+    modelNames: [
+        'gemini-3.5-flash-lite',   // único modelo que responde en esta key hoy
+    ],
+    // LEGACY: se conserva por compat con código externo que pudo haberla usado.
+    // Si `modelNames` viene vacío, el analyzer cae a este valor único.
+    modelName: 'gemini-3.5-flash-lite',
     // Timeout duro del cliente. Si el proxy tarda más, cancelamos y seguimos
     // sin observaciones auditivas (fallback silencioso).
-    timeoutMs: 20000,
+    // Subido de 20000 → 35000: con maxSegments=3 y segmentDurationSec=8 (24s
+    // de audio) más el prompt + JSON de salida, Gemini Flash puede rondar
+    // los 15-25s bajo carga normal y 30s+ bajo picos. 20s dejaba muy poco
+    // margen y disparaba fallback frecuentemente. Si seguís viendo timeouts:
+    // bajar maxSegments a 2 (16s) o segmentDurationSec a 6 antes de subir más.
+    timeoutMs: 35000,
     // Un JSON completo (4 obs + 3 strengths + 3 areas + 2 uncertainties en
     // español, frases hasta 160 chars) llega tranquilo a 900-1100 tokens.
     // 500 nos truncaba respuestas ricas mid-palabra (Google devuelve

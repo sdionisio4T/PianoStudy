@@ -197,6 +197,15 @@ Deno.serve(async (req: Request) => {
         });
       }
       contents = [{ role: 'user', parts: [{ text: prompt }] }];
+      // maxOutputTokens en modo texto: sin esto, Gemini puede cortar el JSON
+      // a mitad de string. El schema completo del análisis ronda 1500-2500
+      // tokens; 3000 deja margen. Se puede override desde el cliente con
+      // maxOutputTokens en el body (mismo campo que audio), cap 4096.
+      const HARD_MAX_TEXT_TOKENS = 4096;
+      const maxTokRaw = Number(payloadIn.maxOutputTokens);
+      maxOutputTokens = Number.isFinite(maxTokRaw) && maxTokRaw > 0
+        ? Math.min(HARD_MAX_TEXT_TOKENS, Math.floor(maxTokRaw))
+        : 3000;
     }
 
     const payload: Record<string, unknown> = { contents };

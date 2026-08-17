@@ -167,3 +167,34 @@ describe('validateAnalysisSchema — observations cap 3', () => {
         expect(r.value.observations[0].fact).toBe('a');
     });
 });
+
+describe('AIAnalysisEngine._extractRetryAfterMs — parseo del retry-after de Groq', () => {
+    it('parsea "try again in 54.9s" del body de error', () => {
+        const body = { error: { message: 'Rate limit reached ... Please try again in 54.9s. Need more tokens?' } };
+        expect(AIAnalysisEngine._extractRetryAfterMs(body)).toBe(54900);
+    });
+
+    it('parsea "try again in 500ms"', () => {
+        const body = { error: { message: 'Rate limit ... try again in 500ms.' } };
+        expect(AIAnalysisEngine._extractRetryAfterMs(body)).toBe(500);
+    });
+
+    it('parsea desde un body string plano', () => {
+        expect(AIAnalysisEngine._extractRetryAfterMs('please try again in 8s.')).toBe(8000);
+    });
+
+    it('devuelve null si el body no contiene el patrón', () => {
+        expect(AIAnalysisEngine._extractRetryAfterMs({ error: 'other error' })).toBeNull();
+        expect(AIAnalysisEngine._extractRetryAfterMs(null)).toBeNull();
+        expect(AIAnalysisEngine._extractRetryAfterMs(undefined)).toBeNull();
+        expect(AIAnalysisEngine._extractRetryAfterMs('')).toBeNull();
+    });
+
+    it('devuelve null para números malformados', () => {
+        expect(AIAnalysisEngine._extractRetryAfterMs('try again in NaNs.')).toBeNull();
+    });
+
+    it('respeta el HARD_LIMIT_MS = 15000 (constante expuesta)', () => {
+        expect(AIAnalysisEngine.RETRY_AFTER_HARD_LIMIT_MS).toBe(15000);
+    });
+});

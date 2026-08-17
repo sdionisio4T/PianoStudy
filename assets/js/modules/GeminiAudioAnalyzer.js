@@ -129,108 +129,181 @@ export function validateAuditoryPayload(parsed, clips) {
 }
 
 // Punto de entrada. Devuelve:
-//   { observations: {...}, usage: { segments_sent, audio_seconds_sent,
-//                                   input_tokens, output_tokens, total_tokens } }
+//   { observations: {...}, model_used, usage: { segments_sent, audio_seconds_sent,
+//                                               input_tokens, output_tokens, total_tokens } }
 // o null si no hay nada que aportar o el proxy no respondió bien.
 // Nunca tira: siempre resuelve.
 export async function analyzeAudioClips(clips, metadata = {}, config = {}) {
     const cfg = { ...GEMINI_AUDIO_CONFIG, ...config };
     if (!Array.isArray(clips) || clips.length === 0) return null;
 
+    // Lista de modelos a probar en orden. Si `modelNames` no vino, se cae al
+    // legacy `modelName` como lista de uno solo para no romper callers viejos.
+    const modelList = Array.isArray(cfg.modelNames) && cfg.modelNames.length > 0
+        ? cfg.modelNames.filter(m => typeof m === 'string' && m.trim())
+        : [cfg.modelName].filter(Boolean);
+    if (modelList.length === 0) {
+        console.warn('gemini-audio: no hay modelos configurados');
+        return null;
+    }
+
     const parts = buildParts(metadata, clips);
     const totalSeconds = clips.reduce((s, c) => s + (Number(c.seconds) || 0), 0);
 
-    const body = {
-        mode: 'audio',
-        systemPrompt: AUDIO_SYSTEM_PROMPT,
-        parts,
-        model: cfg.modelName,
-        temperature: cfg.temperature,
-        maxOutputTokens: cfg.maxOutputTokens,
-        responseFormat: 'json_object',
-    };
-
-    // Retry silencioso ante 503/429 (transitorios). Un reintento con 1.5s de
-    // backoff cubre la mayoría de los picos temporales de Gemini ("This model
-    // is currently experiencing high demand"). Errores 4xx que no sean 429
-    // no se reintentan — son problemas del request, reintentar no ayuda.
-    const TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
-    const invokeOnce = () => withTimeout(
-        db.functions.invoke('gemini-proxy', { body }),
-        cfg.timeoutMs,
-    );
-
-    const maxAttempts = 1 + Math.max(0, Number(cfg.retryAttempts) || 0);
     const backoff = Math.max(0, Number(cfg.retryBackoffMs) || 0);
+    const maxAttemptsPerModel = 1 + Math.max(0, Number(cfg.retryAttempts) || 0);
+
+    // Rotación entre modelos. Para cada uno, permitimos hasta N reintentos
+    // ante errores transitorios NO relacionados con cuota (503, 500, timeout).
+    // Un 429/403 con quota → saltar al siguiente modelo sin reintentar.
+    let lastFailure = null;
+    for (let mi = 0; mi < modelList.length; mi++) {
+        const model = modelList[mi];
+        const body = {
+            mode: 'audio',
+            systemPrompt: AUDIO_SYSTEM_PROMPT,
+            parts,
+            model,
+            temperature: cfg.temperature,
+            maxOutputTokens: cfg.maxOutputTokens,
+            responseFormat: 'json_object',
+        };
+        const result = await _tryModel(model, body, cfg.timeoutMs, backoff, maxAttemptsPerModel);
+        if (result.ok) {
+            const usageMeta = result.data.body?.usageMetadata || {};
+            const candidate = result.data.body?.candidates?.[0];
+            const text = String(candidate?.content?.parts?.[0]?.text || '').trim();
+            const finishReason = String(candidate?.finishReason || 'unknown');
+            const parsed = parseJsonRelaxed(text);
+            const validated = validateAuditoryPayload(parsed, clips);
+            if (!validated) {
+                const hint = finishReason === 'MAX_TOKENS'
+                    ? ' — RESPUESTA TRUNCADA (subir maxOutputTokens)'
+                    : parsed === null
+                        ? ' — no parseó, posible JSON malformado'
+                        : ' — parseó pero validación descartó (schema o arrays vacíos)';
+                console.warn(`gemini-audio [${model}] respuesta inválida o vacía` + hint,
+                    'finishReason=', finishReason,
+                    'rawTextSnippet=', text.slice(0, 400),
+                );
+                // Respuesta inválida NO es un problema del modelo — no rotamos.
+                return null;
+            }
+            return {
+                observations: validated,
+                model_used: model,
+                usage: {
+                    segments_sent: clips.length,
+                    audio_seconds_sent: Number(totalSeconds.toFixed(2)),
+                    input_tokens: Number(usageMeta.promptTokenCount || 0),
+                    output_tokens: Number(usageMeta.candidatesTokenCount || 0),
+                    total_tokens: Number(usageMeta.totalTokenCount || 0),
+                },
+            };
+        }
+        lastFailure = result;
+        const isLast = mi === modelList.length - 1;
+        if (isLast) break;
+        // Log de rotación: qué modelo se agotó y a cuál pasamos.
+        const reason = result.quotaExhausted
+            ? `cuota diaria agotada (status ${result.status})`
+            : `error definitivo (${result.reason})`;
+        console.info(`gemini-audio [${model}] → fallback a [${modelList[mi + 1]}]: ${reason}`);
+    }
+
+    // Todos los modelos fallaron.
+    console.warn('gemini-audio: todos los modelos fallaron. Último error:',
+        lastFailure?.reason || 'desconocido', 'status=', lastFailure?.status);
+    return null;
+}
+
+// Prueba un modelo con reintentos ante transitorios (503/500/timeout). Devuelve:
+//   { ok: true, data }                                           → respuesta OK, caller la valida
+//   { ok: false, quotaExhausted: true, status, reason }          → cuota agotada, saltar modelo
+//   { ok: false, quotaExhausted: false, status?, reason }        → error irrecuperable
+async function _tryModel(model, body, timeoutMs, backoff, maxAttempts) {
+    const TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
     let response;
-    let attempt = 0;
-    while (attempt < maxAttempts) {
-        attempt++;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-            response = await invokeOnce();
+            response = await withTimeout(
+                db.functions.invoke('gemini-proxy', { body }),
+                timeoutMs,
+            );
         } catch (e) {
+            const msg = e?.message || String(e);
             if (attempt < maxAttempts) {
-                console.info(`gemini-audio invoke falló (intento ${attempt}), reintento en ${backoff}ms:`, e?.message || e);
+                console.info(`gemini-audio [${model}] invoke falló (intento ${attempt}/${maxAttempts}), reintento en ${backoff}ms:`, msg);
                 if (backoff > 0) await new Promise(r => setTimeout(r, backoff));
                 continue;
             }
-            console.warn('gemini-audio invoke falló definitivo:', e?.message || e);
-            return null;
+            // Timeout o network — tratarlo como transitorio del modelo. Si
+            // hay otro modelo disponible, el caller lo prueba (por si el
+            // modelo específico está lento).
+            return { ok: false, quotaExhausted: false, reason: msg };
+        }
+        // Guard: si la invoke resuelve con undefined (caso teórico, ej. mock
+        // sin respuesta configurada), tratarlo como error de transporte.
+        if (!response) {
+            if (attempt < maxAttempts) continue;
+            return { ok: false, quotaExhausted: false, reason: 'empty_response' };
         }
         const status = response?.data?.status;
-        if (typeof status === 'number' && TRANSIENT_STATUSES.has(status) && attempt < maxAttempts) {
-            console.info(`gemini-audio transitorio ${status} (intento ${attempt}), reintento en ${backoff}ms`);
-            if (backoff > 0) await new Promise(r => setTimeout(r, backoff));
-            continue;
+        const bodyStr = _stringifyBody(response?.data?.body);
+
+        // 429/403 con quota → modelo agotado, no reintentar acá, avisar al caller.
+        if ((status === 429 || status === 403) && _isQuotaError(bodyStr)) {
+            return { ok: false, quotaExhausted: true, status, reason: 'quota_exhausted' };
         }
-        break;
+        // 429 sin quota → rate limit temporal por segundo. Tratarlo como
+        // transitorio del modelo: reintentar dentro del cupo, y si sigue
+        // fallando saltar al siguiente modelo por si otro tiene RPM libre.
+        if (status === 429 || TRANSIENT_STATUSES.has(status)) {
+            if (attempt < maxAttempts) {
+                console.info(`gemini-audio [${model}] transitorio ${status} (intento ${attempt}/${maxAttempts}), reintento en ${backoff}ms`);
+                if (backoff > 0) await new Promise(r => setTimeout(r, backoff));
+                continue;
+            }
+            return { ok: false, quotaExhausted: false, status, reason: `transient_${status}` };
+        }
+        // Error 4xx no rate: request malformado, key inválida, modelo no
+        // disponible en tu proyecto. Reintentar el mismo modelo no ayuda,
+        // pero probar OTRO modelo puede sortear el "modelo no accesible".
+        if (typeof status === 'number' && status >= 400) {
+            console.warn(`gemini-audio [${model}] status ${status} body=`, response?.data?.body);
+            return { ok: false, quotaExhausted: false, status, reason: `status_${status}` };
+        }
+        // Error de transporte con data null (edge function down).
+        if (response?.error) {
+            const msg = response.error?.message || String(response.error);
+            if (attempt < maxAttempts) {
+                console.info(`gemini-audio [${model}] transport error (intento ${attempt}), reintento en ${backoff}ms:`, msg);
+                if (backoff > 0) await new Promise(r => setTimeout(r, backoff));
+                continue;
+            }
+            return { ok: false, quotaExhausted: false, reason: `transport: ${msg}` };
+        }
+        // OK
+        return { ok: true, data: response.data };
     }
+    return { ok: false, quotaExhausted: false, reason: 'max_attempts_reached' };
+}
 
-    const { data, error } = response || {};
-    if (error) {
-        console.warn('gemini-audio error transporte:', error?.message || error);
-        return null;
-    }
-    if (!data || typeof data.status !== 'number' || data.status >= 400) {
-        // Log el body completo — el `.error` a veces viene vacío mientras el
-        // resto del body tiene el mensaje real de Google (ej: "Publisher Model
-        // ... was not found or your project does not have access to it").
-        console.warn('gemini-audio bad status:', data?.status, 'body=', data?.body);
-        return null;
-    }
+function _stringifyBody(body) {
+    if (typeof body === 'string') return body;
+    if (!body) return '';
+    try { return JSON.stringify(body); } catch { return String(body); }
+}
 
-    const candidate = data.body?.candidates?.[0];
-    const text = String(candidate?.content?.parts?.[0]?.text || '').trim();
-    const finishReason = String(candidate?.finishReason || 'unknown');
-    const parsed = parseJsonRelaxed(text);
-    const validated = validateAuditoryPayload(parsed, clips);
-    if (!validated) {
-        // Log detallado para poder distinguir los tres modos de falla:
-        //   MAX_TOKENS  → subir maxOutputTokens (respuesta se cortó mid-string)
-        //   STOP + parsed=null → JSON con schema equivocado o control chars
-        //   STOP + parsed={} vacío → observación pobre pero legítima
-        const hint = finishReason === 'MAX_TOKENS'
-            ? ' — RESPUESTA TRUNCADA (subir maxOutputTokens)'
-            : parsed === null
-                ? ' — no parseó, posible JSON malformado'
-                : ' — parseó pero validación descartó (schema o arrays vacíos)';
-        console.warn('gemini-audio respuesta inválida o vacía' + hint,
-            'finishReason=', finishReason,
-            'rawTextSnippet=', text.slice(0, 400),
-            'parsedKeys=', parsed && typeof parsed === 'object' ? Object.keys(parsed) : null,
-        );
-        return null;
-    }
-
-    const usageMeta = data.body?.usageMetadata || {};
-    return {
-        observations: validated,
-        usage: {
-            segments_sent: clips.length,
-            audio_seconds_sent: Number(totalSeconds.toFixed(2)),
-            input_tokens: Number(usageMeta.promptTokenCount || 0),
-            output_tokens: Number(usageMeta.candidatesTokenCount || 0),
-            total_tokens: Number(usageMeta.totalTokenCount || 0),
-        },
-    };
+// Detecta si un error 429/403 viene por cuota diaria agotada (vs rate por
+// segundo). Google usa "RESOURCE_EXHAUSTED" y menciona "quota" en el body
+// cuando es cuota, y errores más genéricos cuando es RPM temporal.
+function _isQuotaError(bodyStr) {
+    if (!bodyStr) return false;
+    const s = bodyStr.toLowerCase();
+    return s.includes('resource_exhausted')
+        || s.includes('quota exceeded')
+        || s.includes('quota exhausted')
+        || s.includes('exceeded your current quota')
+        || s.includes('daily limit');
 }

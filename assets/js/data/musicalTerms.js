@@ -4,8 +4,11 @@
 //
 // Propósito: darle al AIAnalysisEngine una lista compacta y auditable de
 // vocabulario musical CORRECTO por sesión — no una biblioteca completa.
-// La función clave es `getRelevantMusicalTerms(...)` que devuelve entre 8 y 20
+// La función clave es `getRelevantMusicalTerms(...)` que devuelve entre 4 y 10
 // términos según reliability + estilo declarado + evidencia disponible.
+// Cap intencionalmente bajo: el prompt ya lleva reglas generales de uso
+// (REGLA 12 en AIAnalysisEngine.js) y agregar 20 términos en cada llamada
+// consumía ~1500 tokens sin evidencia adicional. Devolver menos y sólidos.
 //
 // El banco NO existe para que el modelo use más palabras. Existe para que use
 // las palabras correctas cuando la evidencia las respalda.
@@ -973,17 +976,22 @@ export const MUSICAL_TERMS = {
 };
 
 // ─── Selector: getRelevantMusicalTerms ───────────────────────────────────
-// Devuelve entre 0 y 20 términos relevantes para el análisis actual.
+// Devuelve entre 0 y 10 términos relevantes para el análisis actual.
 // Filtros aplicados:
 //   1. Reliability: transcripción/melodía/tonalidad — excluye términos que
 //      dependen de señales inconfiables.
-//   2. Estilo declarado: incluye vocabulario específico solo si el estilo
-//      declarado lo justifica. '*' = disponible siempre.
+//   2. Estilo declarado: prioriza vocabulario específico pero NO lo agrega
+//      solo porque el estilo esté declarado — requiere evidencia adicional
+//      (transcripción, escucha, tonalidad reliable). El estilo por sí solo
+//      no habilita ii_V_I, guide_tones, bebop_scale, etc.
 //   3. Datos disponibles: features derivadas (densidad, dinámica, silencio,
 //      rushDrag, rango) habilitan términos observables.
 //   4. Auditory observations: cuando Gemini escuchó, se habilitan advanced
-//      basados en escucha (articulacion, swing_feel, comping, etc.).
-//   5. Cap final a 20; ordenados observable > interpretative > advanced.
+//      basados en escucha (articulacion, swing_feel, comping, etc.) y se
+//      confirman patrones estilísticos avanzados que requieren corroboración.
+//   5. Cap final a 10; ordenados observable > interpretative > advanced.
+//   6. NO rellena hasta el cap — si la evidencia solo sostiene 4 términos,
+//      devuelve 4.
 export function getRelevantMusicalTerms(audioAnalysis, metadata = {}, reliability = null, auditoryObservations = null) {
     const style = String(metadata?.style || '').toLowerCase().replace(/[\s_-]/g, '');
     const level = String(metadata?.level || '').toLowerCase();
@@ -1052,36 +1060,73 @@ export function getRelevantMusicalTerms(audioAnalysis, metadata = {}, reliabilit
     }
 
     // ─── 4. Estilo declarado ────────────────────────────────────────────
+    // Filosofía: el estilo NO habilita advanced por sí solo. Habilita:
+    //   (a) núcleo estilístico (concepto general del estilo, ej. clave, swing).
+    //   (b) advanced ESPECÍFICOS solo cuando además hay evidencia extra
+    //       (transcripción + escucha, o tonalidad reliable + escucha).
+    // Sin esta doble exigencia el prompt se llenaba de vocabulario armónico
+    // (ii_V_I, guide tones, enclosures, playing the changes) que el sistema
+    // NO puede confirmar realmente — y el modelo terminaba tentado a usarlos
+    // solo porque estaban en la lista.
     if (style === 'bebop' || style === 'hardbop') {
-        add('swing');
-        if (hasAuditory) add('swing_feel');
-        if (transcriptionReliable) {
+        add('swing');                                     // núcleo del estilo
+        add('comping');                                   // núcleo del rol pianístico
+        if (hasAuditory) add('swing_feel');               // requiere escucha
+        // Vocabulario armónico/melódico bebop: SOLO con transcripción reliable
+        // Y escucha (Gemini confirmó actividad melódica coherente). Sin esa
+        // doble confirmación no afirmamos que haya bebop scale ni chord tones.
+        if (transcriptionReliable && hasAuditory) {
             add('bebop_scale');
-            add('approach_note');
-            add('enclosure');
-            add('encierro');
             add('chord_tone');
-            add('aproximacion_cromatica');
-            if (keyOk) { add('ii_V_I'); add('guide_tones'); add('sustitucion_tritono'); }
-            if (melodyOk && keyHigh) add('playing_the_changes');
+            // Aproximaciones/encierros son MUY específicos: además de doble
+            // corroboración pedimos tonalidad reliable (para hablar de "nota
+            // objetivo" hace falta saber cuál es la tónica funcional).
+            if (keyHigh) {
+                add('approach_note');
+                add('aproximacion_cromatica');
+                // Enclosure y encierro son casi sinónimos — mantenemos SOLO
+                // uno para no gastar cupo en duplicados semánticos.
+                add('enclosure');
+            }
         }
-        add('call_response');
-        add('comping');
-        add('shell_voicing');
+        // Progresiones ii-V-I / guide tones: requieren tonalidad reliable +
+        // transcripción reliable + escucha. Sin escucha no se puede confirmar
+        // una progresión funcional real, solo la presencia de acordes sueltos.
+        if (transcriptionReliable && keyHigh && hasAuditory) {
+            add('ii_V_I');
+            add('guide_tones');
+        }
+        // sustitucion_tritono y playing_the_changes salen del auto-add por
+        // estilo — extremadamente específicos, solo entran si el objective o
+        // notes los mencionan explícitamente (ver hint check abajo).
     }
     if (style === 'soncubano' || style === 'latinjazz') {
-        add('clave');
-        add('tresillo');
-        add('cinquillo');
-        add('independencia_ritmica');
-        if (hasAuditory) { add('interlocking'); add('clave_2_3'); add('clave_3_2'); }
-        add('montuno');
-        add('piano_tumbao');
-        add('guajeo');
-        if (melodyOk) add('tumbao_bajo');   // sin melody separada no afirmamos bajo
-        add('straight_eighths');
-        // Latin jazz también hereda vocabulario de armonía jazz cuando aplique
-        if (style === 'latinjazz' && transcriptionReliable && keyOk) {
+        add('clave');                                     // referencia estilística base
+        add('independencia_ritmica');                     // fundamental en el estilo
+        if (transcriptionReliable || hasAuditory) {
+            add('tresillo');
+        }
+        // Patrones pianísticos específicos: requieren escucha o transcripción
+        // reliable + patrón real. Antes se agregaban por el solo hecho de
+        // declarar el estilo — genera falsa sensación de que el sistema
+        // "detecta" clave/montuno cuando en realidad solo lo asume.
+        if (hasAuditory) {
+            add('montuno');
+            add('piano_tumbao');
+            add('interlocking');
+            add('clave_2_3');
+            add('clave_3_2');
+        }
+        if (hasAuditory && transcriptionReliable) {
+            add('guajeo');                                // patrón repetitivo requiere ambas
+        }
+        if (melodyOk && hasAuditory) {
+            add('tumbao_bajo');                           // bajo separable + escucha
+        }
+        if (transcriptionReliable) add('straight_eighths');
+        // Latin jazz hereda armonía jazz SOLO con la triple corroboración:
+        // transcription + key reliable + escucha.
+        if (style === 'latinjazz' && transcriptionReliable && keyHigh && hasAuditory) {
             add('ii_V_I');
             add('chord_tone');
             add('guide_tones');
@@ -1089,11 +1134,14 @@ export function getRelevantMusicalTerms(audioAnalysis, metadata = {}, reliabilit
     }
     if (style === 'bolero') {
         add('fraseo_bolero');
-        add('rubato');
-        add('rubato_bolero');
         add('expresividad_melodica');
+        // Rubato: requiere evidencia de variación temporal REAL (rushDrag) o
+        // escucha; sin eso "rubato en bolero" es una asunción del estilo.
+        if (hasAuditory) {
+            add('rubato');
+            add('rubato_bolero');
+        }
         if (transcriptionReliable) add('arpegio_acompanamiento');
-        add('cantabile' in MUSICAL_TERMS ? 'cantabile' : 'expresividad_melodica'); // fallback si no está
     }
     if (style === 'jazzcolombiano') {
         add('fusion_jazz_colombiano');
@@ -1109,11 +1157,28 @@ export function getRelevantMusicalTerms(audioAnalysis, metadata = {}, reliabilit
         if (hint.includes('porro')) add('porro');
     }
     if (style === 'blues') {
-        if (transcriptionReliable) { add('blues_scale'); add('blue_note'); }
+        // Escala blues y blue note: requieren corroboración auditiva además
+        // de transcripción — sin escucha, la presencia de una tercera menor
+        // no confirma lenguaje blues.
+        if (transcriptionReliable && hasAuditory) {
+            add('blues_scale');
+            add('blue_note');
+        }
         add('call_response');
         if (hasAuditory) add('swing_feel');
-        add('stride');
     }
+
+    // Hints por objective/notes: expanden vocabulario avanzado si el pianista
+    // explícitamente menciona el concepto (mejor señal que el estilo declarado).
+    const hintText = `${metadata?.objective || ''} ${metadata?.notes || ''}`.toLowerCase();
+    if (hintText.includes('tritono') || hintText.includes('tritone')) add('sustitucion_tritono');
+    if (hintText.includes('playing the changes') || hintText.includes('sobre cambios')) add('playing_the_changes');
+    if (hintText.includes('walking bass')) add('walking_bass');
+    if (hintText.includes('stride')) add('stride');
+    if (hintText.includes('rootless')) add('rootless_voicing');
+    if (hintText.includes('drop 2') || hintText.includes('drop2')) add('drop_2');
+    if (hintText.includes('cuartal') || hintText.includes('quartal')) add('quartal_voicing');
+    if (hintText.includes('shell voicing')) add('shell_voicing');
 
     // ─── 5. Filtros duros post-selección ────────────────────────────────
     // No importa qué estilo — si transcripción unreliable, sacamos armonía advanced.
@@ -1176,7 +1241,11 @@ export function getRelevantMusicalTerms(audioAnalysis, metadata = {}, reliabilit
         if (dl !== 0) return dl;
         return a.term.localeCompare(b.term);
     });
-    return terms.slice(0, 25);
+    // Cap final: 10. Antes era 25 (con adds automáticos por estilo se llegaba
+    // fácil a 18-20 y consumía ~1500 tokens del prompt sin evidencia real).
+    // Con los gates apretados arriba, muchas sesiones devuelven naturalmente
+    // 5-8 términos — el cap solo actúa como techo cuando hay MUCHA evidencia.
+    return terms.slice(0, 10);
 }
 
 // Utilidad para tests / debug: agrupa por categoría.

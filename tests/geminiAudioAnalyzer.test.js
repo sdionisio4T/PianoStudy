@@ -30,19 +30,19 @@ describe('analyzeAudioClips — fallback silencioso', () => {
 
     it('devuelve null si la invoke tira error', async () => {
         invokeMock.mockRejectedValueOnce(new Error('network down'));
-        const result = await analyzeAudioClips([clip(0, 8)], {}, { retryBackoffMs: 0 });
+        const result = await analyzeAudioClips([clip(0, 8)], {}, { retryBackoffMs: 0, retryAttempts: 0, modelNames: ['test-model'] });
         expect(result).toBeNull();
     });
 
     it('devuelve null si la data trae error de transporte', async () => {
         invokeMock.mockResolvedValueOnce({ data: null, error: { message: 'bad' } });
-        const result = await analyzeAudioClips([clip(0, 8)], {}, { retryBackoffMs: 0 });
+        const result = await analyzeAudioClips([clip(0, 8)], {}, { retryBackoffMs: 0, retryAttempts: 0, modelNames: ['test-model'] });
         expect(result).toBeNull();
     });
 
     it('devuelve null si el status upstream es ≥400', async () => {
         invokeMock.mockResolvedValueOnce({ data: { status: 429, body: { error: 'rate' } }, error: null });
-        const result = await analyzeAudioClips([clip(0, 8)], {}, { retryBackoffMs: 0 });
+        const result = await analyzeAudioClips([clip(0, 8)], {}, { retryBackoffMs: 0, retryAttempts: 0, modelNames: ['test-model'] });
         expect(result).toBeNull();
     });
 
@@ -54,7 +54,7 @@ describe('analyzeAudioClips — fallback silencioso', () => {
             },
             error: null,
         });
-        const result = await analyzeAudioClips([clip(0, 8)], {}, { retryBackoffMs: 0 });
+        const result = await analyzeAudioClips([clip(0, 8)], {}, { retryBackoffMs: 0, retryAttempts: 0, modelNames: ['test-model'] });
         expect(result).toBeNull();
     });
 });
@@ -115,6 +115,84 @@ describe('analyzeAudioClips — respuesta válida', () => {
                 parts: expect.any(Array),
             }),
         }));
+    });
+});
+
+describe('analyzeAudioClips — rotación entre modelos (cuota diaria)', () => {
+    const validBody = (obs = 'Pulso firme') => ({
+        candidates: [{
+            content: { parts: [{ text: JSON.stringify({
+                auditory_observations: [{ type: 'rhythm', observation: obs, confidence: 0.9, timestamp_start: 0, timestamp_end: 8 }],
+                strengths: [], areas_to_explore: [], uncertainties: [],
+            }) }] },
+        }],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
+    });
+
+    it('si el primer modelo devuelve 429 con "quota exceeded" → prueba el segundo modelo automáticamente', async () => {
+        invokeMock
+            .mockResolvedValueOnce({ data: { status: 429, body: { error: { message: 'Quota exceeded for model gemini-2.5-flash' } } }, error: null })
+            .mockResolvedValueOnce({ data: { status: 200, body: validBody('desde modelo B') }, error: null });
+        const result = await analyzeAudioClips([clip(0, 8)], {}, {
+            retryBackoffMs: 0, modelNames: ['modelo-A', 'modelo-B'],
+        });
+        expect(result).not.toBeNull();
+        expect(result.model_used).toBe('modelo-B');
+        expect(result.observations.auditory_observations[0].observation).toBe('desde modelo B');
+        // 2 llamadas: una por modelo, sin reintentar el primero (quota agotada).
+        expect(invokeMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('si el primer modelo devuelve 403 con "RESOURCE_EXHAUSTED" → salta al segundo', async () => {
+        invokeMock
+            .mockResolvedValueOnce({ data: { status: 403, body: { error: { status: 'RESOURCE_EXHAUSTED', message: 'daily limit' } } }, error: null })
+            .mockResolvedValueOnce({ data: { status: 200, body: validBody() }, error: null });
+        const result = await analyzeAudioClips([clip(0, 8)], {}, {
+            retryBackoffMs: 0, modelNames: ['A', 'B'],
+        });
+        expect(result).not.toBeNull();
+        expect(result.model_used).toBe('B');
+    });
+
+    it('si el primer modelo devuelve 503 → reintenta el mismo modelo antes de rotar', async () => {
+        invokeMock
+            .mockResolvedValueOnce({ data: { status: 503, body: { error: 'high demand' } }, error: null })
+            .mockResolvedValueOnce({ data: { status: 200, body: validBody() }, error: null });
+        const result = await analyzeAudioClips([clip(0, 8)], {}, {
+            retryBackoffMs: 0, modelNames: ['A', 'B'], retryAttempts: 1,
+        });
+        expect(result).not.toBeNull();
+        expect(result.model_used).toBe('A'); // el retry rescató al mismo modelo
+        expect(invokeMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('si TODOS los modelos devuelven quota exhausted → devuelve null', async () => {
+        const quotaErr = { data: { status: 429, body: { error: { message: 'Quota exceeded' } } }, error: null };
+        invokeMock.mockResolvedValue(quotaErr);
+        const result = await analyzeAudioClips([clip(0, 8)], {}, {
+            retryBackoffMs: 0, modelNames: ['A', 'B', 'C'],
+        });
+        expect(result).toBeNull();
+        expect(invokeMock).toHaveBeenCalledTimes(3); // uno por modelo, sin retries
+    });
+
+    it('usa el primer modelo si funciona (no rota innecesariamente)', async () => {
+        invokeMock.mockResolvedValueOnce({ data: { status: 200, body: validBody() }, error: null });
+        const result = await analyzeAudioClips([clip(0, 8)], {}, {
+            retryBackoffMs: 0, modelNames: ['A', 'B', 'C'],
+        });
+        expect(result).not.toBeNull();
+        expect(result.model_used).toBe('A');
+        expect(invokeMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('con modelNames vacío, cae a modelName legacy (compat)', async () => {
+        invokeMock.mockResolvedValueOnce({ data: { status: 200, body: validBody() }, error: null });
+        const result = await analyzeAudioClips([clip(0, 8)], {}, {
+            retryBackoffMs: 0, modelNames: [], modelName: 'legacy-model',
+        });
+        expect(result).not.toBeNull();
+        expect(result.model_used).toBe('legacy-model');
     });
 });
 

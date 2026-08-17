@@ -42,15 +42,25 @@ export function sanitizeJsonControlChars(text) {
 // 2. Texto extra antes/después del objeto
 // 3. Control chars sin escapar dentro de strings (el bug más común)
 // 4. Objeto anidado dentro de texto suelto
+// 5. Respuesta TRUNCADA a mitad de string/objeto/array (sucede cuando el
+//    proveedor corta el output por max_tokens o timeout parcial). Se intenta
+//    cerrar strings y agregar las llaves/corchetes faltantes para recuperar
+//    lo que sí llegó completo del schema.
 //
 // Devuelve el objeto parseado, o null si no logra recuperar nada.
 export function parseLlmJson(text) {
     if (typeof text !== 'string' || !text.trim()) return null;
     let s = text.trim();
 
-    // 1. Sacar fences si los hay
-    const fence = s.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-    if (fence) s = fence[1].trim();
+    // 1. Sacar fences si los hay. Regex tolera fences SIN cierre (típico en
+    // respuestas truncadas: llega ```json { ... y no llega el ``` final).
+    const fenceClosed = s.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    if (fenceClosed) {
+        s = fenceClosed[1].trim();
+    } else {
+        const fenceOpen = s.match(/^```(?:json)?\s*([\s\S]*)$/i);
+        if (fenceOpen) s = fenceOpen[1].trim();
+    }
 
     // 2. Intento directo
     try { return JSON.parse(s); } catch { /* seguir con sanitización */ }
@@ -63,7 +73,7 @@ export function parseLlmJson(text) {
     // completo balanceando llaves, tolerando texto adicional antes/después.
     const start = sanitized.indexOf('{');
     if (start === -1) return null;
-    let depth = 0, inStr = false, esc = false;
+    let depth = 0, arrDepth = 0, inStr = false, esc = false;
     for (let i = start; i < sanitized.length; i++) {
         const ch = sanitized[i];
         if (esc) { esc = false; continue; }
@@ -73,11 +83,91 @@ export function parseLlmJson(text) {
         if (ch === '{') depth++;
         else if (ch === '}') {
             depth--;
-            if (depth === 0) {
+            if (depth === 0 && arrDepth === 0) {
                 try { return JSON.parse(sanitized.slice(start, i + 1)); }
-                catch { return null; }
+                catch { /* seguir a reparación de truncamiento */ break; }
             }
         }
+        else if (ch === '[') arrDepth++;
+        else if (ch === ']') arrDepth--;
+    }
+
+    // 5. Reparación de respuesta truncada. Si el brace matching se terminó
+    // sin cerrar el objeto raíz (depth > 0), casi seguro que la respuesta
+    // vino cortada por max_tokens del proveedor. Intentamos:
+    //   a) cerrar el string abierto (si inStr al final)
+    //   b) sacar el último token incompleto (número/palabra a mitad, coma
+    //      colgante, ':' sin valor)
+    //   c) cerrar arrays y objetos que quedaron abiertos
+    // Si algo del schema se recuperó (los primeros campos completos), el
+    // caller obtiene un objeto parcial válido en lugar de perder TODO.
+    return _repairTruncatedJson(sanitized, start);
+}
+
+// Intenta reparar un JSON truncado desde `sanitized[start..]` cerrando strings,
+// arrays y objetos abiertos. Devuelve el objeto parseado o null.
+//
+// Estrategia: rastrear pares (,) y cierres (}, ]) como puntos "seguros" —
+// SÓLO ahí sabemos con certeza que estamos entre valores completos. Un
+// string cerrado NO cuenta como safe: puede ser una key esperando su value.
+function _repairTruncatedJson(sanitized, start) {
+    let inStr = false, esc = false;
+    const openStack = [];   // '{' o '[' — orden de apertura para cerrar en reverso
+    let lastSafe = -1;      // último índice safe (después de ',' | '}' | ']')
+    let lastSafeStack = []; // snapshot del stack en lastSafe
+
+    for (let i = start; i < sanitized.length; i++) {
+        const ch = sanitized[i];
+        if (esc) { esc = false; continue; }
+        if (ch === '\\') { esc = true; continue; }
+        if (ch === '"') { inStr = !inStr; continue; }
+        if (inStr) continue;
+        if (ch === '{' || ch === '[') openStack.push(ch);
+        else if (ch === '}' || ch === ']') openStack.pop();
+        // Sólo ',', '}' o ']' confirman fin-de-valor. Un '"' de cierre podría
+        // ser una key todavía sin value ("k":).
+        if (ch === '}' || ch === ']' || ch === ',') {
+            lastSafe = i;
+            lastSafeStack = [...openStack];
+        }
+    }
+
+    const attempts = [];
+
+    // Cuando el corte cayó dentro de un string, rescatar el string parcial
+    // suele conservar el campo más pedagógico (musicalAnalysis a medias >
+    // sin musicalAnalysis). Probamos ESE primero.
+    if (inStr) {
+        const piece = sanitized.slice(start) + '"';
+        const closes = openStack.slice().reverse()
+            .map(open => open === '{' ? '}' : ']').join('');
+        attempts.push(piece + closes);
+    }
+
+    // Fallback: cortar en el último punto safe (después de coma o cierre),
+    // remover coma colgante, cerrar contenedores. Preserva los campos que
+    // llegaron completos aunque perdamos el que estaba en curso.
+    if (lastSafe >= start) {
+        let piece = sanitized.slice(start, lastSafe + 1).replace(/,\s*$/, '');
+        const closes = lastSafeStack.slice().reverse()
+            .map(open => open === '{' ? '}' : ']').join('');
+        attempts.push(piece + closes);
+    }
+
+    // Último recurso: tomar todo y podar sufijo ambiguo (':', ',', keyword
+    // incompleto). Solo cierre de contenedores — sirve para casos donde el
+    // corte cae después de un ':' sin valor.
+    if (!inStr && openStack.length > 0) {
+        const piece = sanitized.slice(start)
+            .replace(/,\s*"[^"]*"\s*:?\s*$/, '')  // key colgante ("strengths": o "strengths")
+            .replace(/[,:\s]+$/, '');             // separadores colgantes
+        const closes = openStack.slice().reverse()
+            .map(open => open === '{' ? '}' : ']').join('');
+        attempts.push(piece + closes);
+    }
+
+    for (const candidate of attempts) {
+        try { return JSON.parse(candidate); } catch { /* siguiente */ }
     }
     return null;
 }

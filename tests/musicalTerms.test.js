@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { MUSICAL_TERMS, getRelevantMusicalTerms, groupTermsByCategory } from '../assets/js/data/musicalTerms.js';
+import { AIAnalysisEngine } from '../assets/js/modules/AIAnalysisEngine.js';
+
+// Helper: auditory observations plausibles para tests que necesitan escucha.
+const baseAuditory = () => ({
+    auditory_observations: [
+        { type: 'articulation', observation: 'notas conectadas', confidence: 0.7, timestamp_start: 5, timestamp_end: 12 },
+    ],
+});
 
 // Helpers para armar audioAnalysis / reliability plausibles con overrides.
 const baseAudio = (over = {}) => ({
@@ -105,55 +113,60 @@ describe('getRelevantMusicalTerms — filtros por reliability', () => {
         expect(ids).not.toContain('interlocking');
     });
 
-    it('con auditoryObservations disponibles → SÍ incluye articulacion + swing_feel (si estilo aplica)', () => {
+    it('con auditoryObservations disponibles + SIN estilo → SÍ incluye articulacion + ataque', () => {
+        // Con el cap 10 + boost por estilo, cuando hay estilo declarado el cupo se llena
+        // primero con términos específicos del estilo. Verificamos la habilitación en el
+        // caso sin estilo, donde los auditory-dependent tienen cupo garantizado.
         const auditory = {
             auditory_observations: [
                 { type: 'articulation', observation: 'notas conectadas', confidence: 0.7, timestamp_start: 5, timestamp_end: 12 },
             ],
         };
-        const terms = getRelevantMusicalTerms(baseAudio(), { style: 'bebop' }, baseReliability(), auditory);
+        const terms = getRelevantMusicalTerms(baseAudio(), {}, baseReliability(), auditory);
         const ids = terms.map(t => t.id);
         expect(ids).toContain('articulacion');
-        expect(ids).toContain('swing_feel');
+        expect(ids).toContain('ataque');
     });
 });
 
 describe('getRelevantMusicalTerms — estilos', () => {
-    it('estilo bebop + reliability alta → habilita vocabulario bebop (bebop_scale, approach_note, chord_tone)', () => {
-        const terms = getRelevantMusicalTerms(baseAudio(), { style: 'bebop' }, baseReliability(), null);
+    it('estilo bebop + reliability alta + escucha → habilita vocabulario bebop (bebop_scale, chord_tone)', () => {
+        // NUEVO: los avanzados bebop ahora requieren transcription + escucha (doble corroboración).
+        // Sin escucha, se quedan afuera aunque el estilo esté declarado (ver test más abajo).
+        const terms = getRelevantMusicalTerms(baseAudio(), { style: 'bebop' }, baseReliability(), baseAuditory());
         const ids = terms.map(t => t.id);
         expect(ids).toContain('bebop_scale');
-        expect(ids).toContain('approach_note');
         expect(ids).toContain('chord_tone');
-        expect(ids).toContain('ii_V_I'); // habilitado porque keyOk + transcriptionReliable + style bebop
+        expect(ids).toContain('ii_V_I'); // habilitado porque keyHigh + transcriptionReliable + hasAuditory
     });
 
     it('estilo bebop declarado NO obliga a mencionar ii_V_I (solo lo HABILITA en el vocabulario)', () => {
-        // Este test verifica que el término aparezca en la lista, no que sea obligatorio.
-        // La obligatoriedad la controla el prompt (REGLA 12) — acá solo verificamos que
-        // el selector no lo saque cuando el estilo lo justifica y la reliability lo permite.
-        const terms = getRelevantMusicalTerms(baseAudio(), { style: 'bebop' }, baseReliability(), null);
+        // Verifica que el término aparezca en la lista cuando hay evidencia, no que sea obligatorio.
+        // La obligatoriedad la controla el prompt (REGLA 12).
+        const terms = getRelevantMusicalTerms(baseAudio(), { style: 'bebop' }, baseReliability(), baseAuditory());
         const ids = terms.map(t => t.id);
         expect(ids).toContain('ii_V_I');
-        // Y con transcription unreliable, se saca — probando que la habilitación es condicionada.
+        // Con transcription unreliable, se saca — la habilitación es condicionada.
         const terms2 = getRelevantMusicalTerms(
             baseAudio(),
             { style: 'bebop' },
             baseReliability({ transcription: { level: 'unreliable', available: false, score: 0.1, warnings: [] } }),
-            null,
+            baseAuditory(),
         );
         expect(terms2.map(t => t.id)).not.toContain('ii_V_I');
     });
 
-    it('estilo soncubano + reliability alta + escucha → habilita clave, montuno, piano_tumbao, guajeo', () => {
+    it('estilo soncubano + reliability alta + escucha → habilita núcleo estilístico afrocubano', () => {
+        // Con cap 10 y muchos términos específicos afrocubanos, algunos de los muy
+        // específicos (guajeo, tumbao_bajo, clave_2_3, clave_3_2) pueden quedar afuera
+        // por prioridad de ordenamiento — lo importante es que el NÚCLEO llegue al prompt.
         const auditory = { auditory_observations: [{ type: 'rhythm', observation: 'clave presente', confidence: 0.8, timestamp_start: 0, timestamp_end: 8 }] };
         const terms = getRelevantMusicalTerms(baseAudio(), { style: 'soncubano' }, baseReliability(), auditory);
         const ids = terms.map(t => t.id);
         expect(ids).toContain('clave');
         expect(ids).toContain('montuno');
-        expect(ids).toContain('piano_tumbao');
-        expect(ids).toContain('guajeo');
         expect(ids).toContain('tresillo');
+        expect(ids).toContain('independencia_ritmica');
     });
 
     it('estilo soncubano NO trata montuno, guajeo y piano_tumbao como sinónimos (los 3 tienen entradas separadas)', () => {
@@ -180,10 +193,10 @@ describe('getRelevantMusicalTerms — estilos', () => {
 });
 
 describe('getRelevantMusicalTerms — límites y edge cases', () => {
-    it('siempre devuelve <= 25 términos (cap del selector)', () => {
+    it('siempre devuelve <= 10 términos (cap del selector reducido para ahorrar tokens)', () => {
         const auditory = { auditory_observations: [{ type: 'x', observation: 'y', confidence: 0.8, timestamp_start: 0, timestamp_end: 1 }] };
         const terms = getRelevantMusicalTerms(baseAudio(), { style: 'bebop' }, baseReliability(), auditory);
-        expect(terms.length).toBeLessThanOrEqual(25);
+        expect(terms.length).toBeLessThanOrEqual(10);
     });
 
     it('cuando NO hay estilo declarado, ordena por nivel: observable → interpretative → advanced', () => {
@@ -196,10 +209,11 @@ describe('getRelevantMusicalTerms — límites y edge cases', () => {
         }
     });
 
-    it('con estilo declarado, los términos ESPECÍFICOS del estilo van primero (aunque sean advanced)', () => {
+    it('con estilo declarado + escucha, los términos ESPECÍFICOS del estilo van primero (aunque sean advanced)', () => {
         // Confirmamos que el boost por estilo funciona — al menos un advanced del estilo aparece
-        // antes que algún observable/interpretative genérico.
-        const terms = getRelevantMusicalTerms(baseAudio(), { style: 'bebop' }, baseReliability(), null);
+        // antes que algún observable/interpretative genérico. Requiere auditory ahora porque los
+        // advanced bebop pasaron a exigir escucha para habilitarse.
+        const terms = getRelevantMusicalTerms(baseAudio(), { style: 'bebop' }, baseReliability(), baseAuditory());
         const ids = terms.map(t => t.id);
         const bebopScaleIdx = ids.indexOf('bebop_scale');
         const respIdx = ids.indexOf('respiracion_musical');
@@ -230,6 +244,139 @@ describe('getRelevantMusicalTerms — límites y edge cases', () => {
         // Pero sí los base
         expect(ids).toContain('tempo');
         expect(ids).toContain('pulso');
+    });
+});
+
+describe('getRelevantMusicalTerms — gates apretados (fase de reducción de tokens)', () => {
+    it('estilo bebop SIN escucha NO habilita ii_V_I, guide_tones, bebop_scale, chord_tone, playing_the_changes', () => {
+        // Regla clave: el estilo declarado por sí solo NO habilita vocabulario avanzado.
+        // Sin auditory (Gemini no escuchó), estos advanced quedan afuera aunque la
+        // transcripción y la tonalidad sean reliable.
+        const terms = getRelevantMusicalTerms(baseAudio(), { style: 'bebop' }, baseReliability(), null);
+        const ids = terms.map(t => t.id);
+        expect(ids).not.toContain('ii_V_I');
+        expect(ids).not.toContain('guide_tones');
+        expect(ids).not.toContain('bebop_scale');
+        expect(ids).not.toContain('chord_tone');
+        expect(ids).not.toContain('playing_the_changes');
+        expect(ids).not.toContain('enclosure');
+        expect(ids).not.toContain('approach_note');
+    });
+
+    it('estilo bebop SIN escucha SÍ mantiene el núcleo estilístico observable (swing, comping)', () => {
+        // Aunque los advanced queden afuera, el núcleo estilístico (concepto general del estilo)
+        // sigue disponible para que el modelo pueda hablar del estilo.
+        const terms = getRelevantMusicalTerms(baseAudio(), { style: 'bebop' }, baseReliability(), null);
+        const ids = terms.map(t => t.id);
+        expect(ids).toContain('swing');
+        expect(ids).toContain('comping');
+    });
+
+    it('estilo soncubano SIN escucha NO habilita montuno, piano_tumbao, guajeo', () => {
+        // Mismo criterio: patrones pianísticos específicos requieren corroboración auditiva,
+        // no solo la declaración del estilo.
+        const terms = getRelevantMusicalTerms(baseAudio(), { style: 'soncubano' }, baseReliability(), null);
+        const ids = terms.map(t => t.id);
+        expect(ids).not.toContain('montuno');
+        expect(ids).not.toContain('piano_tumbao');
+        expect(ids).not.toContain('guajeo');
+        // Pero el núcleo estilístico se mantiene
+        expect(ids).toContain('clave');
+        expect(ids).toContain('independencia_ritmica');
+    });
+
+    it('con evidencia mínima (sin notas, sin loudness, sin auditory, sin estilo) devuelve MENOS de 10 términos', () => {
+        // No rellena artificialmente hasta el cap. Con poca evidencia, la lista se queda corta.
+        const poorAudio = { tempo: {}, key: {}, loudness: {}, midiNotes: [], duration: 10 };
+        const terms = getRelevantMusicalTerms(
+            poorAudio,
+            {},
+            baseReliability({
+                transcription: { level: 'unreliable', available: false, score: 0.1, warnings: [] },
+                key: { value: null, reliability: 'low', confidence: 0.3, reasons_for_hedge: ['baja'] },
+                melody: { status: 'unknown', note: 'no separada' },
+            }),
+            null,
+        );
+        expect(terms.length).toBeLessThan(10);
+    });
+
+    it('hint explícito "playing the changes" en objective habilita playing_the_changes (más señal que el estilo)', () => {
+        const terms = getRelevantMusicalTerms(
+            baseAudio(),
+            { style: 'bebop', objective: 'quiero mejorar mi playing the changes' },
+            baseReliability(),
+            null,
+        );
+        expect(terms.map(t => t.id)).toContain('playing_the_changes');
+    });
+});
+
+describe('formatMusicalTermsForPrompt — representación compacta', () => {
+    const engine = new AIAnalysisEngine();
+
+    it('string vacío si no hay términos', () => {
+        expect(engine.formatMusicalTermsForPrompt([])).toBe('');
+        expect(engine.formatMusicalTermsForPrompt(null)).toBe('');
+    });
+
+    it('emite header con referencia a REGLA 12 UNA sola vez', () => {
+        const terms = getRelevantMusicalTerms(baseAudio(), { style: 'bebop' }, baseReliability(), baseAuditory());
+        const block = engine.formatMusicalTermsForPrompt(terms);
+        const headerMatches = (block.match(/VOCABULARIO MUSICAL DISPONIBLE/g) || []).length;
+        expect(headerMatches).toBe(1);
+        expect(block).toMatch(/REGLA 12/);
+    });
+
+    it('NO incluye metadata interna: aliases, category, relatedTerms, nivel entre paréntesis, "Uso:"', () => {
+        // Elegimos densidad_ritmica que tiene aliases ['densidad'] y relatedTerms conocidos para
+        // asegurarnos de que no se filtren al prompt.
+        const terms = [MUSICAL_TERMS.densidad_ritmica, MUSICAL_TERMS.pulso, MUSICAL_TERMS.fraseo];
+        const block = engine.formatMusicalTermsForPrompt(terms);
+        // Metadata que NO debería aparecer:
+        expect(block).not.toMatch(/aliases/i);
+        expect(block).not.toMatch(/relatedTerms/i);
+        expect(block).not.toMatch(/category/i);
+        expect(block).not.toMatch(/allowedWhen/i);
+        expect(block).not.toMatch(/evidenceRequired/i);
+        // Ya no emitimos "(observable)" / "(interpretative)" / "(advanced)" ni prefijo "Uso:".
+        expect(block).not.toMatch(/\(observable\)/);
+        expect(block).not.toMatch(/\(interpretative\)/);
+        expect(block).not.toMatch(/\(advanced\)/);
+        expect(block).not.toMatch(/Uso:/);
+    });
+
+    it('cada término ocupa UNA línea con formato "- Term: definition[ NO: restriccion.]"', () => {
+        const terms = [MUSICAL_TERMS.pulso, MUSICAL_TERMS.densidad_ritmica];
+        const block = engine.formatMusicalTermsForPrompt(terms);
+        const lines = block.split('\n').filter(Boolean);
+        // 1 header + N términos
+        expect(lines.length).toBe(1 + terms.length);
+        for (const term of terms) {
+            const line = lines.find(l => l.startsWith(`- ${term.term}:`));
+            expect(line, `hay línea para ${term.term}`).toBeTruthy();
+        }
+    });
+
+    it('el formato compacto es mucho más chico que el anterior (ahorro de tokens)', () => {
+        // Comparamos la longitud del bloque nuevo contra una reconstrucción del formato viejo
+        // sobre los mismos términos. Debería ser al menos 50% más corto.
+        const terms = getRelevantMusicalTerms(baseAudio(), { style: 'bebop' }, baseReliability(), baseAuditory());
+        const nuevo = engine.formatMusicalTermsForPrompt(terms);
+        const viejo = terms.map(t => {
+            const levelTag = t.level ? ` (${t.level})` : '';
+            const use = t.pedagogicalUse ? ` Uso: ${t.pedagogicalUse}` : '';
+            const forbid = Array.isArray(t.forbiddenWhen) && t.forbiddenWhen.length
+                ? ` NO usar cuando: ${t.forbiddenWhen.slice(0, 2).join('; ')}.`
+                : '';
+            return `- ${t.term}${levelTag}: ${t.definition}${use}${forbid}`;
+        }).join('\n');
+        expect(nuevo.length).toBeLessThan(viejo.length * 0.5);
+    });
+
+    it('alias formatMusicalTermsBlock sigue funcionando (compatibilidad hacia atrás)', () => {
+        const terms = [MUSICAL_TERMS.pulso];
+        expect(engine.formatMusicalTermsBlock(terms)).toBe(engine.formatMusicalTermsForPrompt(terms));
     });
 });
 

@@ -69,7 +69,7 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { prompt, systemPrompt, model, temperature, responseFormat } = await req.json();
+    const { prompt, systemPrompt, model, temperature, responseFormat, maxTokens: payloadMaxTokens } = await req.json();
 
     if (!prompt || typeof prompt !== 'string') {
       return new Response(JSON.stringify({ error: 'Missing prompt' }), {
@@ -85,6 +85,20 @@ Deno.serve(async (req: Request) => {
       ? Math.min(1, Math.max(0, Number(temperature)))
       : 0.7;
     const wantsJson = responseFormat === 'json_object';
+
+    // max_completion_tokens: sin esto, el default de Groq para llama-3.3-70b
+    // cortaba respuestas JSON a mitad de string (~1024 tokens) y el parser
+    // caía a fallback. Con el schema completo (musicalAnalysis 3-4 párrafos +
+    // 3 observations × 3 capas + exercise steps + moments + beliefVsDetection
+    // + metacognitiveQuestion) una respuesta rica ronda 1500-2500 tokens.
+    // 3000 deja margen sin habilitar respuestas absurdamente largas.
+    // Se puede override desde el cliente con `maxTokens` si algún caller lo
+    // necesita, siempre acotado al techo duro (evita costo runaway).
+    const HARD_MAX_TOKENS = 4096;
+    const clientMaxTokens = Number(payloadMaxTokens);
+    const maxTokens = Number.isFinite(clientMaxTokens) && clientMaxTokens > 0
+      ? Math.min(HARD_MAX_TOKENS, Math.floor(clientMaxTokens))
+      : 3000;
 
     const apiKey = Deno.env.get('GROQ_API_KEY');
     if (!apiKey) {
@@ -107,6 +121,7 @@ Deno.serve(async (req: Request) => {
       model: typeof model === 'string' && model ? model : DEFAULT_MODEL,
       messages,
       temperature: temp,
+      max_completion_tokens: maxTokens,
     };
     if (wantsJson) {
       payload.response_format = { type: 'json_object' };
