@@ -1458,7 +1458,105 @@ export const audioFlowMixin = {
         const tempo = Number(audioAnalysis?.tempo?.bpm || audioAnalysis?.tempo || 0);
         const key = `${audioAnalysis?.key?.key || audioAnalysis?.pitch || '--'} ${audioAnalysis?.key?.scale || ''}`.trim();
         const dynamic = Number(audioAnalysis?.loudness?.dynamicComplexity || 0);
-        const content = `ANÁLISIS DE INTERPRETACIÓN MUSICAL\n\nGrabación: ${recordingName}\nDuración: ${audioAnalysis.duration.toFixed(1)}s\nTempo: ${tempo} BPM\nTonalidad: ${key}\nComplejidad dinámica: ${dynamic.toFixed(2)}\nPuntuación: ${aiAnalysis.overallScore}/10\n\nANÁLISIS MUSICAL:\n${aiAnalysis.musicalAnalysis}\n\nASPECTOS POSITIVOS:\n${(aiAnalysis.positiveAspects || []).map((a, i) => `${i + 1}. ${a}`).join('\n')}\n\nÁREAS DE MEJORA:\n${(aiAnalysis.areasToImprove || []).map((a, i) => `${i + 1}. ${a}`).join('\n')}\n\nSUGERENCIAS DE PRÁCTICA:\n${(aiAnalysis.practiceSuggestions || []).map((s, i) => `${i + 1}. ${s.title}\n   ${s.description}`).join('\n\n')}`;
+
+        // Construimos secciones opcionalmente para no dejar títulos vacíos
+        // cuando el modelo no devolvió ese campo (igual que la UI, que oculta
+        // las secciones sin datos con .hidden).
+        const sections = [];
+
+        sections.push('ANÁLISIS DE INTERPRETACIÓN MUSICAL');
+        sections.push('');
+        sections.push(`Grabación: ${recordingName || '—'}`);
+        sections.push(`Duración: ${(audioAnalysis?.duration || 0).toFixed(1)}s`);
+        sections.push(`Tempo: ${tempo} BPM`);
+        sections.push(`Tonalidad: ${key}`);
+        sections.push(`Complejidad dinámica: ${dynamic.toFixed(2)}`);
+        sections.push(`Puntuación: ${aiAnalysis.overallScore}/10`);
+
+        if (aiAnalysis.musicalAnalysis) {
+            sections.push('');
+            sections.push('ANÁLISIS MUSICAL:');
+            sections.push(aiAnalysis.musicalAnalysis);
+        }
+
+        const strengths = Array.isArray(aiAnalysis.strengths) ? aiAnalysis.strengths : [];
+        if (strengths.length) {
+            sections.push('');
+            sections.push('ASPECTOS POSITIVOS:');
+            strengths.forEach((s, i) => sections.push(`${i + 1}. ${s}`));
+        }
+
+        const observations = Array.isArray(aiAnalysis.observations) ? aiAnalysis.observations : [];
+        if (observations.length) {
+            sections.push('');
+            sections.push('ÁREAS DE MEJORA:');
+            observations.forEach((o, i) => {
+                sections.push(`${i + 1}. Hecho: ${o.fact || '—'}`);
+                if (o.interpretation) sections.push(`   Interpretación: ${o.interpretation}`);
+                if (o.recommendation) sections.push(`   Recomendación: ${o.recommendation}`);
+                if (o.confidence) sections.push(`   Confianza: ${o.confidence}`);
+            });
+        }
+
+        if (aiAnalysis.primaryFocus) {
+            sections.push('');
+            sections.push('TU FOCO PRINCIPAL:');
+            sections.push(aiAnalysis.primaryFocus);
+        }
+
+        const moments = Array.isArray(aiAnalysis.moments) ? aiAnalysis.moments : [];
+        if (moments.length) {
+            sections.push('');
+            sections.push('MOMENTOS DESTACADOS:');
+            const fmt = (t) => {
+                const s = Math.max(0, Math.floor(Number(t) || 0));
+                return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+            };
+            moments.forEach((m) => {
+                const range = `[${fmt(m.timeStart)}-${fmt(m.timeEnd)}]`;
+                const kindLabel = m.kind === 'good' ? '+' : m.kind === 'improve' ? '!' : '·';
+                sections.push(`${kindLabel} ${range} ${m.note || ''}`);
+            });
+        }
+
+        const ex = aiAnalysis.practiceExercise;
+        if (ex && (ex.title || ex.description || (Array.isArray(ex.steps) && ex.steps.length))) {
+            sections.push('');
+            sections.push('EJERCICIO DE PRÁCTICA:');
+            const dur = Number(ex.durationMin);
+            const header = Number.isFinite(dur) && dur > 0
+                ? `${ex.title || 'Ejercicio'} (${dur} min)`
+                : (ex.title || 'Ejercicio');
+            sections.push(header);
+            if (Array.isArray(ex.steps) && ex.steps.length) {
+                ex.steps.forEach((step, i) => sections.push(`  ${i + 1}. ${step}`));
+            } else if (ex.description) {
+                sections.push(ex.description);
+            }
+            if (ex.checkQuestion) {
+                sections.push(`Comprobación: ${ex.checkQuestion}`);
+            }
+        }
+
+        if (aiAnalysis.nextGoal) {
+            sections.push('');
+            sections.push('PRÓXIMO OBJETIVO:');
+            sections.push(aiAnalysis.nextGoal);
+        }
+
+        if (aiAnalysis.metacognitiveQuestion) {
+            sections.push('');
+            sections.push('PREGUNTA PARA VOS:');
+            sections.push(aiAnalysis.metacognitiveQuestion);
+        }
+
+        if (aiAnalysis.beliefVsDetection) {
+            sections.push('');
+            sections.push('LO QUE CREÍSTE vs. LO QUE SE ESCUCHÓ:');
+            sections.push(aiAnalysis.beliefVsDetection);
+        }
+
+        const content = sections.join('\n');
 
         const blob = new Blob([content], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
