@@ -6,6 +6,8 @@
 // vocabulario musical CORRECTO por sesión — no una biblioteca completa.
 // La función clave es `getRelevantMusicalTerms(...)` que devuelve entre 4 y 10
 // términos según reliability + estilo declarado + evidencia disponible.
+// El cap final es adaptativo: 6 con evidencia mínima, 8 intermedia, 10 rica
+// (rica = auditory + transcripción reliable + tonalidad high).
 // Cap intencionalmente bajo: el prompt ya lleva reglas generales de uso
 // (REGLA 12 en AIAnalysisEngine.js) y agregar 20 términos en cada llamada
 // consumía ~1500 tokens sin evidencia adicional. Devolver menos y sólidos.
@@ -976,7 +978,8 @@ export const MUSICAL_TERMS = {
 };
 
 // ─── Selector: getRelevantMusicalTerms ───────────────────────────────────
-// Devuelve entre 0 y 10 términos relevantes para el análisis actual.
+// Devuelve entre 0 y 10 términos relevantes (cap adaptativo 6/8/10 por
+// cantidad de capas fuertes de evidencia — ver comentario al final).
 // Filtros aplicados:
 //   1. Reliability: transcripción/melodía/tonalidad — excluye términos que
 //      dependen de señales inconfiables.
@@ -989,7 +992,10 @@ export const MUSICAL_TERMS = {
 //   4. Auditory observations: cuando Gemini escuchó, se habilitan advanced
 //      basados en escucha (articulacion, swing_feel, comping, etc.) y se
 //      confirman patrones estilísticos avanzados que requieren corroboración.
-//   5. Cap final a 10; ordenados observable > interpretative > advanced.
+//   5. Cap final adaptativo (6/7/8) según cantidad de capas fuertes de
+//      evidencia (auditory + transcripción reliable + tonalidad high);
+//      ordenados observable > interpretative > advanced dentro de cada
+//      prioridad.
 //   6. NO rellena hasta el cap — si la evidencia solo sostiene 4 términos,
 //      devuelve 4.
 export function getRelevantMusicalTerms(audioAnalysis, metadata = {}, reliability = null, auditoryObservations = null) {
@@ -1227,25 +1233,38 @@ export function getRelevantMusicalTerms(audioAnalysis, metadata = {}, reliabilit
     // evidencia es fuerte y merecen prioridad para no perderse en el cap.
     const AUDITORY_DEPENDENT = new Set(['articulacion', 'ataque', 'swing_feel', 'interlocking', 'subdivision']);
     const isAuditoryBoosted = (t) => hasAuditory && AUDITORY_DEPENDENT.has(t.id);
+    // Fundamentals: términos base que casi siempre son útiles pedagógicamente
+    // (referencia rítmica y armónica mínima). Reciben boost para no perderse
+    // por ordenamiento alfabético cuando el cap se acerca.
+    const FUNDAMENTALS = new Set(['tempo', 'pulso', 'estabilidad_del_pulso']);
+    const isFundamental = (t) => FUNDAMENTALS.has(t.id);
     const terms = [...selected]
         .map(id => MUSICAL_TERMS[id])
         .filter(Boolean);
     terms.sort((a, b) => {
         // Prioridad 0: match de estilo declarado (advanced específico del estilo).
-        // Prioridad 1: dependiente de escucha con auditory disponible (evidencia fuerte).
-        // Prioridad 2: todo lo demás por nivel.
-        const pa = styleMatchesTerm(a) ? 0 : isAuditoryBoosted(a) ? 1 : 2;
-        const pb = styleMatchesTerm(b) ? 0 : isAuditoryBoosted(b) ? 1 : 2;
+        // Prioridad 1: fundamentales pedagógicos base (tempo/pulso/estabilidad).
+        // Prioridad 2: dependiente de escucha con auditory disponible.
+        // Prioridad 3: todo lo demás por nivel.
+        const pa = styleMatchesTerm(a) ? 0 : isFundamental(a) ? 1 : isAuditoryBoosted(a) ? 2 : 3;
+        const pb = styleMatchesTerm(b) ? 0 : isFundamental(b) ? 1 : isAuditoryBoosted(b) ? 2 : 3;
         if (pa !== pb) return pa - pb;
         const dl = (levelOrder[a.level] ?? 3) - (levelOrder[b.level] ?? 3);
         if (dl !== 0) return dl;
         return a.term.localeCompare(b.term);
     });
-    // Cap final: 10. Antes era 25 (con adds automáticos por estilo se llegaba
-    // fácil a 18-20 y consumía ~1500 tokens del prompt sin evidencia real).
-    // Con los gates apretados arriba, muchas sesiones devuelven naturalmente
-    // 5-8 términos — el cap solo actúa como techo cuando hay MUCHA evidencia.
-    return terms.slice(0, 10);
+    // Cap final adaptativo por cantidad de capas fuertes de evidencia
+    // (auditory + transcripción reliable + tonalidad high):
+    //   - 3 capas (evidencia rica): hasta 10 términos, con margen para
+    //     vocabulario avanzado del estilo corroborado por escucha + armonía.
+    //   - 1-2 capas (evidencia intermedia): hasta 8.
+    //   - 0 capas (solo base observable): 6.
+    // No rellena artificialmente: si la evidencia solo sostiene 4 términos
+    // relevantes, devuelve 4. Objetivo: ahorrar tokens del cupo TPM sin
+    // perder vocabulario cuando la evidencia realmente lo respalda.
+    const evidenceStrength = (hasAuditory ? 1 : 0) + (transcriptionReliable ? 1 : 0) + (keyHigh ? 1 : 0);
+    const cap = evidenceStrength >= 3 ? 10 : evidenceStrength >= 1 ? 8 : 6;
+    return terms.slice(0, cap);
 }
 
 // Utilidad para tests / debug: agrupa por categoría.

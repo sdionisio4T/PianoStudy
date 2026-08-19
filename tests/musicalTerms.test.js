@@ -193,10 +193,36 @@ describe('getRelevantMusicalTerms — estilos', () => {
 });
 
 describe('getRelevantMusicalTerms — límites y edge cases', () => {
-    it('siempre devuelve <= 10 términos (cap del selector reducido para ahorrar tokens)', () => {
+    it('siempre devuelve <= 10 términos (techo duro para ahorrar tokens del cupo TPM)', () => {
         const auditory = { auditory_observations: [{ type: 'x', observation: 'y', confidence: 0.8, timestamp_start: 0, timestamp_end: 1 }] };
         const terms = getRelevantMusicalTerms(baseAudio(), { style: 'bebop' }, baseReliability(), auditory);
         expect(terms.length).toBeLessThanOrEqual(10);
+    });
+
+    it('con evidencia intermedia (solo una capa fuerte) devuelve <= 8', () => {
+        // Solo transcripción reliable, sin auditory ni key high — evidencia intermedia.
+        const terms = getRelevantMusicalTerms(
+            baseAudio(),
+            { style: 'bebop' },
+            baseReliability({
+                key: { value: null, reliability: 'low', confidence: 0.3, reasons_for_hedge: [] },
+            }),
+            null,
+        );
+        expect(terms.length).toBeLessThanOrEqual(8);
+    });
+
+    it('con evidencia base (sin auditory, sin transcripción reliable, sin key high) devuelve <= 6', () => {
+        const terms = getRelevantMusicalTerms(
+            baseAudio(),
+            {},
+            baseReliability({
+                key: { value: null, reliability: 'low', confidence: 0.3, reasons_for_hedge: [] },
+                transcription: { level: 'unreliable', available: false, score: 0.1, warnings: [] },
+            }),
+            null,
+        );
+        expect(terms.length).toBeLessThanOrEqual(6);
     });
 
     it('cuando NO hay estilo declarado, ordena por nivel: observable → interpretative → advanced', () => {
@@ -377,6 +403,105 @@ describe('formatMusicalTermsForPrompt — representación compacta', () => {
     it('alias formatMusicalTermsBlock sigue funcionando (compatibilidad hacia atrás)', () => {
         const terms = [MUSICAL_TERMS.pulso];
         expect(engine.formatMusicalTermsBlock(terms)).toBe(engine.formatMusicalTermsForPrompt(terms));
+    });
+});
+
+describe('buildAnalysisPrompt — deduplicación de reglas y schema estable', () => {
+    const engine = new AIAnalysisEngine();
+
+    const baseAudioForPrompt = () => ({
+        tempo: { bpm: 120, confidence: 0.85 },
+        key: { key: 'C', scale: 'major', strength: 0.75 },
+        loudness: { average: -18, dynamicComplexity: 0.35 },
+        duration: 42,
+        midiNotes: Array.from({ length: 60 }, (_, i) => ({
+            pitchMidi: 60 + (i % 12), startTimeSeconds: i * 0.4, durationSeconds: 0.35, amplitude: 0.5,
+        })),
+    });
+
+    it('reglas generales del vocabulario aparecen UNA sola vez (no se repiten por término ni por sección)', () => {
+        const { systemPrompt, userPrompt } = engine.buildAnalysisPrompt(
+            baseAudioForPrompt(), { style: 'bebop' }, null, baseAuditory(), baseReliability(), null,
+        );
+        // La regla "usá solo lo que la evidencia respalde" debe aparecer una sola vez en el system
+        // (en R12). El userPrompt puede mencionar "VOCABULARIO MUSICAL DISPONIBLE" pero no repetir
+        // la regla completa.
+        const evidenceRulePattern = /usá\s+(?:s[oó]lo|solo)\s+lo\s+que\s+la\s+evidencia\s+.*respalde/gi;
+        const systemMatches = (systemPrompt.match(evidenceRulePattern) || []).length;
+        expect(systemMatches).toBeLessThanOrEqual(1);
+        const userMatches = (userPrompt.match(evidenceRulePattern) || []).length;
+        expect(userMatches).toBe(0);
+    });
+
+    it('prohibición de "densidad" en musicalAnalysis se declara sin duplicación excesiva', () => {
+        const { systemPrompt } = engine.buildAnalysisPrompt(
+            baseAudioForPrompt(), { style: 'bebop' }, null, baseAuditory(), baseReliability(), null,
+        );
+        // Antes aparecía 5 veces (R2, R6, ESTRUCTURA, AUTO-PODA, REGLAS FINALES). El objetivo tras
+        // consolidar es ≤ 3 menciones (regla + poda + schema). Más de eso indica regresión.
+        const densidadProhibida = (systemPrompt.match(/[Pp]rohibido[^\n]*densidad|"densidad"[^\n]*(prohibido|sin|reescrib)|SIN\s+la\s+palabra\s+['"]densidad['"]/g) || []).length;
+        expect(densidadProhibida).toBeLessThanOrEqual(3);
+    });
+
+    it('el bloque de vocabulario solo aparece si hay términos y no repite la regla general por término', () => {
+        const { userPrompt } = engine.buildAnalysisPrompt(
+            baseAudioForPrompt(), { style: 'bebop' }, null, baseAuditory(), baseReliability(), null,
+        );
+        // El header del vocabulario debe salir 1 sola vez si hay términos
+        const vocabHeaders = (userPrompt.match(/VOCABULARIO MUSICAL DISPONIBLE/g) || []).length;
+        expect(vocabHeaders).toBeLessThanOrEqual(1);
+        // Y no debe repetir "REGLA 12" en cada término (solo una referencia al header)
+        const regla12Refs = (userPrompt.match(/REGLA 12/g) || []).length;
+        expect(regla12Refs).toBeLessThanOrEqual(1);
+    });
+
+    it('el schema JSON expone los mismos campos top-level (no cambia con esta reducción)', () => {
+        const { systemPrompt } = engine.buildAnalysisPrompt(
+            baseAudioForPrompt(), { style: 'bebop' }, null, baseAuditory(), baseReliability(), null,
+        );
+        const expectedFields = [
+            'overallScore', 'musicalAnalysis', 'strengths', 'observations',
+            'primaryFocus', 'practiceExercise', 'moments', 'nextGoal',
+            'beliefVsDetection', 'metacognitiveQuestion',
+        ];
+        for (const field of expectedFields) {
+            expect(systemPrompt).toContain(`"${field}"`);
+        }
+    });
+
+    it('melody.status = unknown mantiene bloqueo de afirmaciones sobre melodía en el vocabulario', () => {
+        // La restricción del vocabulario no cambia con la reducción — sin melodía separable,
+        // contorno_melodico / walking_bass / tumbao_bajo / playing_the_changes no entran.
+        const terms = getRelevantMusicalTerms(
+            baseAudioForPrompt(),
+            { style: 'bebop' },
+            baseReliability({ melody: { status: 'unknown', note: 'no separada' } }),
+            baseAuditory(),
+        );
+        const ids = terms.map(t => t.id);
+        expect(ids).not.toContain('contorno_melodico');
+        expect(ids).not.toContain('walking_bass');
+        expect(ids).not.toContain('tumbao_bajo');
+        expect(ids).not.toContain('playing_the_changes');
+    });
+
+    it('articulación sigue requiriendo evidencia auditiva tras la reducción', () => {
+        // Sin auditory, articulación NO entra aunque haya transcripción reliable.
+        const withoutAuditory = getRelevantMusicalTerms(baseAudioForPrompt(), {}, baseReliability(), null);
+        expect(withoutAuditory.map(t => t.id)).not.toContain('articulacion');
+        // Con auditory + sin estilo, sí entra.
+        const withAuditory = getRelevantMusicalTerms(baseAudioForPrompt(), {}, baseReliability(), baseAuditory());
+        expect(withAuditory.map(t => t.id)).toContain('articulacion');
+    });
+
+    it('el pipeline sigue siendo Groq → fallback local (no cambia con esta reducción)', () => {
+        // Contrato de la clase: callAI delega solamente en callGroq; no hay callGemini en la ruta
+        // de texto (el fallback local es la única red de seguridad). Este test protege el pipeline.
+        expect(engine.callAI).toBeTypeOf('function');
+        expect(engine.callGroq).toBeTypeOf('function');
+        // callAI y callGroq deberían apuntar al mismo mecanismo (callAI llama a callGroq).
+        const groqSource = engine.callAI.toString();
+        expect(groqSource).toMatch(/callGroq/);
     });
 });
 

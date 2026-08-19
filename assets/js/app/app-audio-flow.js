@@ -382,8 +382,8 @@ export const audioFlowMixin = {
 
         // LLM que sintetizó el feedback — se deriva del source del aiAnalysis.
         const llmMap = {
-            'ai-groq':         { name: 'Groq', model: 'llama-3.3-70b-versatile', cls: 'ok' },
-            'ai-groq+audio':   { name: 'Groq', model: 'llama-3.3-70b-versatile', cls: 'ok' },
+            'ai-groq':         { name: 'Groq', model: 'compound-mini', cls: 'ok' },
+            'ai-groq+audio':   { name: 'Groq', model: 'compound-mini', cls: 'ok' },
             'ai-gemini':       { name: 'Gemini', model: 'gemini-1.5-flash', cls: 'ok' },
             'ai-gemini+audio': { name: 'Gemini', model: 'gemini-1.5-flash', cls: 'ok' },
             'fallback-parse-error':    { name: 'Fallback', model: 'JSON inválido del LLM', cls: 'fail' },

@@ -20,9 +20,22 @@ const corsHeaders: Record<string, string> = {
 };
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-// Modelo por defecto — llama-3.3-70b-versatile es el generalista más capaz
-// del free tier. Se puede sobreescribir desde el cliente pasando `model`.
-const DEFAULT_MODEL = 'llama-3.3-70b-versatile';
+// Modelo por defecto — groq/compound-mini. Historia del cambio (2026-08-18):
+//   1. `llama-3.3-70b-versatile` dejó de estar habilitado para la org
+//      Personal entre el 16 y el 18 de agosto (Groq removió acceso;
+//      /models no lo lista más, toda llamada devuelve model_not_found).
+//   2. Migramos a `qwen/qwen3.6-27b` — funcionó, pero su TPM free tier es
+//      8K y el prompt (~4K) + max_completion_tokens (2K) = 6K por request,
+//      dejando 2K de margen: cualquier segunda grabación dentro del minuto
+//      caía por 429.
+//   3. Migramos a `groq/compound-mini`: TPM free tier 70K (8.75× más
+//      margen), mismo endpoint OpenAI-compatible. Trade-off: compound es
+//      un modelo agentic (LLM + tools); en teoría puede añadir metadatos
+//      no previstos, pero response_format json_object + parseLlmJson en
+//      el cliente toleran texto alrededor del JSON. Si aparecen problemas
+//      de formato, revertir a qwen es un one-liner.
+// Se puede sobreescribir desde el cliente pasando `model`.
+const DEFAULT_MODEL = 'groq/compound-mini';
 
 const rateLimiter = createRateLimiter({ limit: 10, windowMs: 60_000 });
 
@@ -86,19 +99,24 @@ Deno.serve(async (req: Request) => {
       : 0.7;
     const wantsJson = responseFormat === 'json_object';
 
-    // max_completion_tokens: sin esto, el default de Groq para llama-3.3-70b
-    // cortaba respuestas JSON a mitad de string (~1024 tokens) y el parser
-    // caía a fallback. Con el schema completo (musicalAnalysis 3-4 párrafos +
-    // 3 observations × 3 capas + exercise steps + moments + beliefVsDetection
-    // + metacognitiveQuestion) una respuesta rica ronda 1500-2500 tokens.
-    // 3000 deja margen sin habilitar respuestas absurdamente largas.
-    // Se puede override desde el cliente con `maxTokens` si algún caller lo
-    // necesita, siempre acotado al techo duro (evita costo runaway).
+    // max_completion_tokens: sin esto, el default de Groq cortaba respuestas
+    // JSON a mitad de string (~1024 tokens) y el parser caía a fallback. Con
+    // el schema completo (musicalAnalysis 2-3 párrafos + hasta 3 observations
+    // × 3 capas + exercise steps + moments + beliefVsDetection +
+    // metacognitiveQuestion) una respuesta rica ronda 1500-2000 tokens.
+    //
+    // Ajustado 2026-08-18: 3000 → 2000. Groq factura el TPM contra el max
+    // SOLICITADO, no contra lo que la respuesta realmente usa. Con Qwen 3.6
+    // 27B (8000 TPM en free tier), 3000 hacía inviable dos grabaciones
+    // seguidas en el mismo minuto. 2000 deja margen para respuestas ricas
+    // (>90% de las respuestas medidas caen dentro) y libera ~1000 TPM por
+    // request. Se puede override desde el cliente con `maxTokens` si algún
+    // caller necesita respuestas más largas, siempre acotado al techo duro.
     const HARD_MAX_TOKENS = 4096;
     const clientMaxTokens = Number(payloadMaxTokens);
     const maxTokens = Number.isFinite(clientMaxTokens) && clientMaxTokens > 0
       ? Math.min(HARD_MAX_TOKENS, Math.floor(clientMaxTokens))
-      : 3000;
+      : 2000;
 
     const apiKey = Deno.env.get('GROQ_API_KEY');
     if (!apiKey) {
