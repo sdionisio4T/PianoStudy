@@ -526,6 +526,15 @@
                             <span class="analysis-toggle__hint">testing A/B — apagalo para comparar el feedback sin la segunda capa auditiva</span>
                         </label>
 
+                        <label class="analysis-toggle" for="analysis-provider-toggle" title="Cuando está encendido, Gemini genera también el texto pedagógico del análisis (por defecto lo hace Groq).">
+                            <input type="checkbox" id="analysis-provider-toggle" />
+                            <span class="analysis-toggle__label">
+                                <i class="fas fa-comment-dots"></i>
+                                Análisis con Gemini
+                            </span>
+                            <span class="analysis-toggle__hint">experimental — cambia el motor que redacta la retroalimentación. Consume el mismo cupo diario de Gemini que la escucha profunda.</span>
+                        </label>
+
                         <button id="start-analysis-btn" class="btn-primary" disabled>
                             <i class="fas fa-brain"></i> Analizar Grabación
                         </button>

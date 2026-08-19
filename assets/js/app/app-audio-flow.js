@@ -44,6 +44,7 @@ export const audioFlowMixin = {
         this.showSection('ai-analysis');
         this.loadRecordingsForAnalysis();
         this._initGeminiToggle();
+        this._initProviderToggle();
     },
 
     // Toggle "Escucha profunda (Gemini)". Persistido por usuario. Default ON
@@ -62,6 +63,30 @@ export const audioFlowMixin = {
                     this.userKey('pianostudy-gemini-audio-enabled'),
                     !!toggle.checked,
                 );
+            });
+        }
+    },
+
+    // Toggle "Análisis con Gemini" — decide qué proveedor genera el texto
+    // pedagógico. Default OFF (Groq). Persistido en la key global que lee
+    // AIAnalysisEngine._getProvider() ('pianoStudy.aiProvider').
+    // Es global (no por usuario) porque el flag es experimental / A/B corto.
+    _initProviderToggle() {
+        const toggle = document.getElementById('analysis-provider-toggle');
+        if (!toggle) return;
+        let stored = null;
+        try { stored = localStorage.getItem('pianoStudy.aiProvider'); } catch { /* ignore */ }
+        toggle.checked = stored === 'gemini';
+        if (!toggle._providerWired) {
+            toggle._providerWired = true;
+            toggle.addEventListener('change', () => {
+                try {
+                    if (toggle.checked) {
+                        localStorage.setItem('pianoStudy.aiProvider', 'gemini');
+                    } else {
+                        localStorage.removeItem('pianoStudy.aiProvider');
+                    }
+                } catch { /* ignore */ }
             });
         }
     },

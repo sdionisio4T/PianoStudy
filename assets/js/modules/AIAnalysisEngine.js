@@ -9,16 +9,17 @@ export class AIAnalysisEngine {
     // 'gemini-proxy'), que leen la key desde Deno.env y validan el JWT del
     // usuario autenticado.
     //
-    // Estrategia de proveedores (2026-08 actualizada):
-    //   TEXTO — solo Groq. Si Groq falla → fallback LOCAL directo (sin ir a
-    //   Gemini) para conservar el cupo diario de Gemini para su uso propio:
-    //   escucha profunda del audio (GeminiAudioAnalyzer.js), que aporta las
-    //   observaciones auditivas y no tiene sustituto local.
+    // Estrategia de proveedores (2026-08 — modo A/B):
+    //   TEXTO — Groq (default) o Gemini (experimental), elegido por
+    //   localStorage['pianoStudy.aiProvider'] = 'groq' | 'gemini'. Cada modo
+    //   es explícito: si el proveedor activo falla, vamos directo al fallback
+    //   local (sin cruzar al otro), para que el A/B sea limpio.
     //   AUDIO — solo Gemini vía GeminiAudioAnalyzer.js (pipeline separado
     //   que NO usa esta clase).
     //
-    // callGemini() se conserva por si en el futuro se quiere reactivar como
-    // fallback opcional, pero ni callAI() ni analyzePerformance() lo invocan.
+    // Cuidado: activar modo Gemini para texto CONSUME el mismo cupo diario
+    // que la escucha de audio. En sesiones con mucha grabación puede agotarse
+    // antes; volver a 'groq' o dejar de activarlo por defecto es la mitigación.
 
     // Umbral duro de tokens estimados que el prompt (system + user) NO debe
     // exceder al enviarse a Groq. El límite del free tier es ~12000 TPM;
@@ -86,6 +87,21 @@ export class AIAnalysisEngine {
         const body = { prompt, systemPrompt: systemPrompt || undefined };
         if (Number.isFinite(options.temperature)) body.temperature = options.temperature;
         if (options.responseFormat === 'json_object') body.responseFormat = 'json_object';
+        // Cap de tokens de respuesta: crítico para el análisis completo — el
+        // schema (musicalAnalysis + strengths + 3 observations con 3 capas +
+        // primaryFocus + practiceExercise + moments + nextGoal + beliefVsDetection
+        // + metacognitiveQuestion) puede pasar el default de cada proxy. Si se
+        // corta el JSON, el schema queda incompleto y varias secciones no
+        // aparecen en la UI.
+        //
+        // Los dos proxies usan nombres distintos para el mismo concepto:
+        // groq-proxy espera `maxTokens`, gemini-proxy espera `maxOutputTokens`.
+        // Mandamos ambos; cada proxy toma el que le corresponde e ignora el otro.
+        if (Number.isFinite(options.maxOutputTokens)) {
+            const n = Math.floor(options.maxOutputTokens);
+            body.maxOutputTokens = n;
+            body.maxTokens = n;
+        }
 
         const maxAttempts = 3;                  // 1 original + 2 reintentos
         let lastErr = null;
@@ -175,11 +191,32 @@ export class AIAnalysisEngine {
         );
     }
 
-    // Solo Groq. Ya no hace fallback a Gemini para conservar su cupo diario
-    // (Gemini se usa para escucha profunda del audio, sin sustituto local).
-    // Si Groq falla, el caller decide qué hacer (fallback local o mensaje al
-    // usuario) — misma interfaz que antes, mismo error surface.
+    // Provider por defecto: Groq. El usuario puede cambiarlo a Gemini como modo
+    // experimental seteando localStorage['pianoStudy.aiProvider'] = 'gemini'.
+    //
+    // Cuidado: Gemini para texto CONSUME el mismo cupo diario que la escucha
+    // de audio (GeminiAudioAnalyzer). En sesiones con mucha grabación puede
+    // agotar cupo antes de tiempo. Está pensado como A/B experimental para
+    // comparar calidad, no como default.
+    //
+    // Valores válidos: 'groq' (default) | 'gemini'.
+    static _getProvider() {
+        try {
+            const stored = typeof localStorage !== 'undefined'
+                ? localStorage.getItem('pianoStudy.aiProvider')
+                : null;
+            return stored === 'gemini' ? 'gemini' : 'groq';
+        } catch { return 'groq'; }
+    }
+
+    // Enruta al proveedor activo. Si Groq falla NO cae a Gemini (y viceversa)
+    // — cada modo es explícito, para que el A/B sea limpio. El caller decide
+    // qué hacer con el error (fallback local o mensaje al usuario).
     async callAI(prompt, systemPrompt = null, options = {}) {
+        const provider = AIAnalysisEngine._getProvider();
+        if (provider === 'gemini') {
+            return await this.callGemini(prompt, systemPrompt, options);
+        }
         return await this.callGroq(prompt, systemPrompt, options);
     }
 
@@ -187,7 +224,16 @@ export class AIAnalysisEngine {
         const { systemPrompt, userPrompt } = this.buildAnalysisPrompt(audioAnalysis, recordingMetadata, studentMemory, auditoryObservations, reliability, selfEvaluation);
         // Temperature baja para análisis JSON: reduce variabilidad del score entre corridas.
         // responseFormat json_object: fuerza al modelo a devolver JSON válido a nivel de proveedor.
-        const options = { temperature: 0.4, responseFormat: 'json_object' };
+        // maxOutputTokens 4096: cap alto para que ningún proveedor corte el
+        // schema completo a mitad de JSON. _callProviderWithRetry lo mapea a
+        // maxTokens (Groq) y maxOutputTokens (Gemini), cada proxy respeta su
+        // techo duro (Groq HARD_MAX_TOKENS=4096, Gemini HARD_MAX_TEXT_TOKENS=4096).
+        //
+        // Trade-off Groq: factura TPM contra el max solicitado, no contra lo
+        // usado. Con compound (70K TPM) 4096 sigue dejando 17× de margen por
+        // request; con compound-mini era igual. Si volviéramos a un modelo de
+        // 8K TPM habría que reducirlo.
+        const options = { temperature: 0.4, responseFormat: 'json_object', maxOutputTokens: 4096 };
         let providerUsed = null;
         let rawText = '';
         // Si Gemini "escuchó" y devolvió algo aprovechable, el badge lo marca —
@@ -197,13 +243,14 @@ export class AIAnalysisEngine {
             && (auditoryObservations.auditory_observations?.length
                 || auditoryObservations.strengths?.length
                 || auditoryObservations.areas_to_explore?.length));
+        const provider = AIAnalysisEngine._getProvider();
         try {
-            rawText = await this.callGroq(userPrompt, systemPrompt, options);
-            providerUsed = 'groq';
+            rawText = await this.callAI(userPrompt, systemPrompt, options);
+            providerUsed = provider;
             const parsed = this.parseAIResponse(rawText);
             const validation = this.validateAnalysisSchema(parsed);
             if (validation.ok) {
-                const baseSource = 'ai-groq';
+                const baseSource = `ai-${provider}`;
                 validation.value.source = hasAudioLayer ? `${baseSource}+audio` : baseSource;
                 return validation.value;
             }
@@ -212,9 +259,10 @@ export class AIAnalysisEngine {
             fallback.source = parsed ? 'fallback-schema-invalid' : 'fallback-parse-error';
             return fallback;
         } catch (error) {
-            // Gemini fallback DESACTIVADO — su cupo diario se reserva para escucha
-            // de audio. Cuando Groq falla vamos directo al fallback local.
-            console.error('Groq no disponible → fallback local (Gemini no se usa como respaldo de texto):', error);
+            // Ningún fallback cruzado entre proveedores: si el activo falla, va
+            // directo al fallback local. Groq y Gemini son modos explícitos y
+            // se comparan limpios en el A/B.
+            console.error(`${provider} no disponible → fallback local:`, error);
             const fallback = this.getFallbackAnalysis(audioAnalysis);
             fallback.source = 'fallback-network';
             return fallback;
@@ -276,7 +324,7 @@ Reglas:
             const text = await this.callAI(userPrompt, systemPrompt, { temperature: 0.6 });
             return text || this.getFallbackAnswer(audioAnalysis, aiAnalysis, q, true);
         } catch (error) {
-            console.error('AI Q&A no disponible (Groq falló, Gemini deshabilitado como respaldo de texto):', error);
+            console.error(`AI Q&A no disponible (${AIAnalysisEngine._getProvider()} falló, sin fallback cruzado):`, error);
             return this.getFallbackAnswer(audioAnalysis, aiAnalysis, q, true);
         }
     }

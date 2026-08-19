@@ -35,7 +35,7 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 //      el cliente toleran texto alrededor del JSON. Si aparecen problemas
 //      de formato, revertir a qwen es un one-liner.
 // Se puede sobreescribir desde el cliente pasando `model`.
-const DEFAULT_MODEL = 'groq/compound-mini';
+const DEFAULT_MODEL = 'groq/compound';
 
 const rateLimiter = createRateLimiter({ limit: 10, windowMs: 60_000 });
 
