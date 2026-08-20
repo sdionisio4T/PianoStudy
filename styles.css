@@ -3660,11 +3660,13 @@
 .btn-danger {
     background: var(--accent-red);
     border-color: var(--accent-red);
+    color: #fff;
 }
 
 .btn-danger:hover {
     background: #ff0040;
     border-color: #ff0040;
+    color: #fff;
 }
 
 /* Phrase Actions */
@@ -5617,6 +5619,16 @@ button,
 .artist-listen-note, .artist-study-focus { margin: 0; font-size: .78rem; line-height: 1.4; color: var(--text-secondary, #aaa); }
 .artist-listen-note i { color: #ff5757; }
 .artist-study-focus i { color: #ffd700; }
+
+.artist-songs { margin: .4rem 0; font-size: .8rem; }
+.artist-songs-label { display: block; color: var(--text-secondary, #aaa); font-size: .78rem; margin-bottom: .3rem; }
+.artist-songs-label i { color: #ff5757; margin-right: .25rem; }
+.artist-songs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .2rem; }
+.artist-song-item { line-height: 1.35; }
+.artist-song-item a { color: var(--text-primary, #eee); text-decoration: none; border-bottom: 1px dotted rgba(255, 87, 87, .4); }
+.artist-song-item a:hover { color: #ff5757; border-bottom-color: #ff5757; }
+.artist-song-item a i { color: #ff5757; margin-right: .3rem; font-size: .78rem; }
+.artist-song-year { color: var(--text-secondary, #888); font-size: .72rem; }
 
 .artist-card-actions {
     display: flex;

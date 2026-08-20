@@ -57,6 +57,13 @@ function weekKey(date = new Date()) {
     return `${target.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
 }
 
+function dayKey(date = new Date()) {
+    const y = date.getUTCFullYear();
+    const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(date.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
 function seededIndex(seed, length) {
     let hash = 0;
     for (const char of seed) hash = ((hash << 5) - hash) + char.charCodeAt(0) | 0;
@@ -85,7 +92,32 @@ function safeYoutubeUrl(artist) {
 // conservan esa URL por compatibilidad; para mostrarla usamos el archivo
 // original, que sigue siendo una ruta pública y está permitida por la CSP.
 function artistImageUrl(artist) {
-    return artist.photo || CURATED_ARTIST_PHOTOS[artist.id] || LOCAL_ARTIST_COVER;
+    return CURATED_ARTIST_PHOTOS[artist.id] || artist.photo || LOCAL_ARTIST_COVER;
+}
+
+function songLinkHref(song, artist) {
+    if (song?.youtubeUrl) {
+        try {
+            const url = new URL(song.youtubeUrl);
+            if (['https:', 'http:'].includes(url.protocol)) return url.href;
+        } catch { /* invalid URL — cae al search */ }
+    }
+    const query = song?.searchQuery || `${song?.title || ''} ${artist?.name || ''}`.trim();
+    return query ? `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}` : '';
+}
+
+function songsListHtml(artist, { max = 5, compact = false } = {}) {
+    const songs = Array.isArray(artist?.songs) ? artist.songs.slice(0, max) : [];
+    if (!songs.length) return '';
+    const items = songs.map(song => {
+        const href = songLinkHref(song, artist);
+        const yearPart = song.year ? ` <span class="artist-song-year">(${escapeHtml(String(song.year))})</span>` : '';
+        const title = escapeHtml(song.title || '');
+        if (!href) return `<li class="artist-song-item">${title}${yearPart}</li>`;
+        return `<li class="artist-song-item"><a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer"><i class="fab fa-youtube"></i> ${title}</a>${yearPart}</li>`;
+    }).join('');
+    const label = compact ? 'Escucha' : 'Canciones recomendadas';
+    return `<div class="artist-songs"><span class="artist-songs-label"><i class="fas fa-music"></i> ${label}:</span><ul class="artist-songs-list">${items}</ul></div>`;
 }
 
 function styleBadge(artist) {
@@ -114,7 +146,7 @@ function artistCardHtml(artist, state, isCustom = false) {
                     ${isCustom ? '<span class="artist-style-badge artist-mine-badge">Mi colección</span>' : ''}
                 </div>
                 <p class="artist-card-desc">${escapeHtml(artist.description || '')}</p>
-                ${album ? `<p class="artist-listen-note"><i class="fas fa-compact-disc"></i> Empieza por <strong>${escapeHtml(album.title)}</strong> (${escapeHtml(String(album.year))})</p>` : ''}
+                ${songsListHtml(artist, { max: 3, compact: true }) || (album ? `<p class="artist-listen-note"><i class="fas fa-compact-disc"></i> Empieza por <strong>${escapeHtml(album.title)}</strong> (${escapeHtml(String(album.year))})</p>` : '')}
                 <p class="artist-study-focus"><i class="fas fa-lightbulb"></i> ${escapeHtml(STUDY_FOCUS[artist.style] || 'Elige una idea musical y llévala a tu práctica.')}</p>
                 <div class="artist-card-actions">
                     ${url ? `<a class="btn-small youtube-btn" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer"><i class="fab fa-youtube"></i> Escuchar</a>` : ''}
@@ -182,14 +214,16 @@ export class ArtistsManager {
         try { localStorage.setItem(this._stateKey(), JSON.stringify(state)); } catch { /* storage unavailable */ }
     }
 
-    getWeeklyArtist() {
-        const preferred = artists.filter(artist => artist.style === this.preferredStyle);
-        const pool = preferred.length ? preferred : artists;
-        return pool[seededIndex(`${weekKey()}-${this.preferredStyle || 'explore'}`, pool.length)];
+    getDailyArtist() {
+        const state = this._getStudyState();
+        const completedIds = new Set(state.completedArtistIds || []);
+        const available = artists.filter(a => !completedIds.has(a.id));
+        const pool = available.length ? available : artists;
+        return pool[seededIndex(dayKey(), pool.length)];
     }
 
-    _weeklyCardHtml(compact = false) {
-        const artist = this.getWeeklyArtist();
+    _dailyCardHtml(compact = false) {
+        const artist = this.getDailyArtist();
         if (!artist) return '';
         const state = this._getStudyState();
         const completed = state.completedArtistIds.includes(artist.id);
@@ -201,17 +235,23 @@ export class ArtistsManager {
             ? `<div class="artist-featured-shell"><img class="artist-featured-image" src="${escapeHtml(imageUrl)}" alt="${escapeHtml(artist.name)}" onerror="this.classList.add('artist-image-failed')"><div class="artist-featured-monogram" aria-hidden="true">${escapeHtml(artist.name.charAt(0))}</div></div>`
             : `<div class="artist-featured-monogram">${escapeHtml(artist.name.charAt(0))}</div>`;
 
+        const songsBlock = songsListHtml(artist, { max: compact ? 3 : 5, compact });
+        const albumFallback = !songsBlock && album
+            ? `<p class="artist-weekly-listen"><i class="fas fa-headphones"></i> Escucha inicial: <strong>${escapeHtml(album.title)}</strong> (${escapeHtml(String(album.year))})</p>`
+            : '';
+
         return `
             <section class="artist-weekly-card ${compact ? 'artist-weekly-card--compact' : ''}">
                 ${image}
                 <div class="artist-weekly-content">
-                    <span class="artist-weekly-eyebrow"><i class="fas fa-calendar-week"></i> Artista de la semana</span>
+                    <span class="artist-weekly-eyebrow"><i class="fas fa-calendar-day"></i> Artista del día</span>
                     <div class="artist-weekly-title-row"><h3>${escapeHtml(artist.name)}</h3>${styleBadge(artist)}</div>
                     ${!compact ? `<p class="artist-weekly-description">${escapeHtml(artist.description || '')}</p>` : ''}
                     <div class="artist-mission"><i class="fas fa-bullseye"></i><span><strong>Misión de estudio:</strong> ${escapeHtml(STUDY_FOCUS[artist.style] || 'Escucha atentamente y aplica una idea en tu práctica.')}</span></div>
-                    ${album ? `<p class="artist-weekly-listen"><i class="fas fa-headphones"></i> Escucha inicial: <strong>${escapeHtml(album.title)}</strong> (${escapeHtml(String(album.year))})</p>` : ''}
+                    ${songsBlock}
+                    ${albumFallback}
                     <div class="artist-weekly-actions">
-                        ${url ? `<a class="btn-small youtube-btn" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer"><i class="fab fa-youtube"></i> Escuchar ahora</a>` : ''}
+                        ${url ? `<a class="btn-small youtube-btn" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer"><i class="fab fa-youtube"></i> Explorar más</a>` : ''}
                         <button class="btn-small artist-action ${saved ? 'is-active' : ''}" data-action="artist-save-weekly" data-id="${escapeHtml(artist.id)}"><i class="${saved ? 'fas' : 'far'} fa-bookmark"></i> ${saved ? 'Guardado' : 'Guardar'}</button>
                         <button class="btn-small artist-action ${completed ? 'is-complete' : ''}" data-action="artist-complete" data-id="${escapeHtml(artist.id)}"><i class="fas fa-check"></i> ${completed ? 'Misión completada' : 'Completar misión'}</button>
                     </div>
@@ -221,7 +261,7 @@ export class ArtistsManager {
 
     renderDashboardCard() {
         const el = document.getElementById('artist-recommendation');
-        if (el) el.innerHTML = this._weeklyCardHtml(true);
+        if (el) el.innerHTML = this._dailyCardHtml(true);
     }
 
     async loadCustomArtists() {
@@ -287,7 +327,7 @@ export class ArtistsManager {
             <div class="artists-page">
                 <div class="artists-full">
                     <div class="artists-toolbar"><h2><i class="fas fa-users"></i> Artistas</h2><button class="btn-primary" data-action="artist-add"><i class="fas fa-plus"></i> Agregar artista</button></div>
-                    ${this._weeklyCardHtml()}
+                    ${this._dailyCardHtml()}
                     <div class="context-help"><i class="fas fa-circle-info" aria-hidden="true"></i><p>Descubre una referencia, escucha con intención y transforma una idea en tu práctica.</p></div>
                     <div class="artists-search-row"><input type="text" id="artist-search" placeholder="Buscar por nombre, estilo o descripción…" value="${escapeHtml(this._searchTerm)}" autocomplete="off"></div>
                     <div class="artists-filters"><button class="filter-btn ${this._activeFilter === 'all' ? 'active' : ''}" data-filter="all">Todos</button>${Object.entries(styleLabels).map(([key, label]) => `<button class="filter-btn ${this._activeFilter === key ? 'active' : ''}" data-filter="${key}" style="--fc:${styleColors[key]}">${escapeHtml(label)}</button>`).join('')}</div>
@@ -398,5 +438,5 @@ export class ArtistsManager {
         } catch (e) { console.error('deleteCustomArtist:', e); this.app.showNotification('Error al eliminar artista', 'error'); }
     }
 
-    getDailyArtistName() { return this.getWeeklyArtist()?.name || ''; }
+    getDailyArtistName() { return this.getDailyArtist()?.name || ''; }
 }

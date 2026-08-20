@@ -411,6 +411,11 @@ export const uiMixin = {
             this.updateAIStatusIndicator();
             this.renderSettings();
         }
+        if (sectionName === 'ai-analysis') {
+            this.loadRecordingsFromServer().finally(() => this.loadRecordingsForAnalysis());
+            this._initGeminiToggle?.();
+            this._initProviderToggle?.();
+        }
     },
 
     showConfirm(message) {

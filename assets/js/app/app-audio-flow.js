@@ -12,6 +12,7 @@ import { assessAnalysis } from '../modules/AnalysisReliability.js';
 import {
     insertLick, updateLick, uploadLickAudio,
     loadRecordingsFromDB, uploadRecording, getRecordingPublicUrl, deleteRecording,
+    downloadRecordingBlob,
     ERR_MSG
 } from '../modules/SupabaseDataManager.js';
 import { db } from '../modules/supabase-client.js';
@@ -42,6 +43,7 @@ export const audioFlowMixin = {
 
     async showAnalysisSection() {
         this.showSection('ai-analysis');
+        await this.loadRecordingsFromServer();
         this.loadRecordingsForAnalysis();
         this._initGeminiToggle();
         this._initProviderToggle();
@@ -505,7 +507,8 @@ export const audioFlowMixin = {
         }
 
         (this.tempRecordings || []).forEach((rec) => {
-            if (!rec || !(rec.blob instanceof Blob)) return;
+            if (!rec) return;
+            if (!(rec.blob instanceof Blob) && !rec.filePath) return;
             const opt = document.createElement('option');
             opt.value = String(rec.id);
             opt.textContent = `${rec.name} (${this.formatDuration(rec.duration || 0)})`;
@@ -513,14 +516,23 @@ export const audioFlowMixin = {
         });
     },
 
-    getRecordingBlobForAnalysis(selectionValue) {
+    async getRecordingBlobForAnalysis(selectionValue) {
         if (selectionValue === 'current') {
             return this.currentRecording instanceof Blob ? this.currentRecording : null;
         }
-        const id = Number(selectionValue);
-        if (!Number.isFinite(id)) return null;
-        const rec = (this.tempRecordings || []).find(r => r.id === id);
-        return rec?.blob instanceof Blob ? rec.blob : null;
+        const rec = (this.tempRecordings || []).find(r => String(r.id) === String(selectionValue));
+        if (!rec) return null;
+        if (rec.blob instanceof Blob) return rec.blob;
+        if (rec.filePath) {
+            const { blob, error } = await downloadRecordingBlob(rec.filePath);
+            if (error || !blob) {
+                console.error('downloadRecordingBlob error:', error);
+                return null;
+            }
+            rec.blob = blob;
+            return blob;
+        }
+        return null;
     },
 
     // Fase B3 SRL: heurística para saber si un objetivo escrito por el usuario
@@ -709,7 +721,7 @@ export const audioFlowMixin = {
         const selection = String(select?.value || '');
         if (!selection) return;
 
-        const audioBlob = this.getRecordingBlobForAnalysis(selection);
+        const audioBlob = await this.getRecordingBlobForAnalysis(selection);
         if (!audioBlob) {
             this.showNotification('Grabación no encontrada', 'error');
             return;
