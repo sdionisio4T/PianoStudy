@@ -136,36 +136,42 @@
             <section class="content">
                 <!-- Dashboard Section -->
                 <div id="dashboard" class="section active">
-                    <h2>Bienvenido a PianoStudy</h2>
+                    <header class="dashboard-hero">
+                        <h2 id="dashboard-greeting">Hola</h2>
+                        <p class="dashboard-brief" id="dashboard-brief"></p>
+                        <p class="dashboard-tagline" id="dashboard-tagline">Cargando la pregunta del día…</p>
+                    </header>
 
-                    <div class="context-help">
-                        <i class="fas fa-circle-info" aria-hidden="true"></i>
-                        <p>Aquí ves un resumen de tu actividad reciente: grabaciones, licks y tu progreso general.</p>
-                    </div>
                     <div class="dashboard-grid">
                         <div class="dashboard-card">
-                            <i class="fas fa-microphone-alt"></i>
-                            <h3>Grabación Rápida</h3>
-                            <p>Comienza a grabar tu sesión de práctica</p>
+                            <div class="dashboard-card-body">
+                                <i class="fas fa-microphone-alt"></i>
+                                <h3>Grabación Rápida</h3>
+                                <p>Comienza a grabar tu sesión de práctica</p>
+                            </div>
                             <button class="btn-primary nav-link" data-section="recorder">
                                 <i class="fas fa-play"></i> Empezar
                             </button>
                         </div>
                         <div class="dashboard-card">
-                            <i class="fas fa-lightbulb"></i>
-                            <h3>Lick Recomendado</h3>
-                            <p id="recommended-lick">Cargando recomendación...</p>
+                            <div class="dashboard-card-body">
+                                <i class="fas fa-lightbulb"></i>
+                                <h3>Lick Recomendado</h3>
+                                <p id="recommended-lick">Cargando recomendación...</p>
+                            </div>
                             <button class="btn-secondary nav-link" data-section="licks">
                                 <i class="fas fa-list"></i> Ver todos
                             </button>
                         </div>
                         <div class="dashboard-card">
-                            <i class="fas fa-headphones"></i>
-                            <h3>Artista del Día</h3>
-                            <div id="artist-recommendation" style="display:flex;flex-direction:column;gap:0.25rem;text-align:left">
-                                <span style="color:var(--text-secondary);font-size:0.85rem">Cargando…</span>
+                            <div class="dashboard-card-body">
+                                <i class="fas fa-headphones"></i>
+                                <h3>Artista del Día</h3>
+                                <div id="artist-recommendation">
+                                    <span style="color:var(--text-secondary);font-size:0.85rem">Cargando…</span>
+                                </div>
                             </div>
-                            <button class="btn-secondary nav-link" data-section="artists" style="margin-top:0.5rem">
+                            <button class="btn-secondary nav-link" data-section="artists">
                                 <i class="fas fa-users"></i> Ver todos
                             </button>
                         </div>

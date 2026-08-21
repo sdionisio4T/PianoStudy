@@ -261,7 +261,32 @@ export class ArtistsManager {
 
     renderDashboardCard() {
         const el = document.getElementById('artist-recommendation');
-        if (el) el.innerHTML = this._dailyCardHtml(true);
+        if (!el) return;
+        const artist = this.getDailyArtist();
+        if (!artist) {
+            el.innerHTML = '<span style="color:var(--text-secondary);font-size:0.85rem">Sin artistas disponibles</span>';
+            return;
+        }
+        const imageUrl = artistImageUrl(artist);
+        const firstSong = Array.isArray(artist.songs) && artist.songs[0] ? artist.songs[0] : null;
+        const firstAlbum = artist.albums?.[0];
+        const listenText = firstSong?.title || firstAlbum?.title || '';
+        const styleLabel = styleLabels[artist.style] || artist.style || '';
+        const listenHref = firstSong
+            ? songLinkHref(firstSong, artist)
+            : safeYoutubeUrl(artist);
+        el.innerHTML = `
+            <div class="dashboard-artist">
+                <div class="dashboard-artist-avatar">
+                    <img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(artist.name)}" onerror="this.classList.add('artist-image-failed')">
+                    <div class="dashboard-artist-monogram" aria-hidden="true">${escapeHtml(artist.name.charAt(0))}</div>
+                </div>
+                <p class="dashboard-artist-name">${escapeHtml(artist.name)}</p>
+                ${styleLabel ? `<p class="dashboard-artist-style">${escapeHtml(styleLabel)}</p>` : ''}
+                ${listenText ? `<p class="dashboard-artist-listen">Empieza por «${escapeHtml(listenText)}»</p>` : ''}
+                ${listenHref ? `<a class="dashboard-artist-youtube" href="${escapeHtml(listenHref)}" target="_blank" rel="noopener noreferrer"><i class="fab fa-youtube"></i> Escuchar en YouTube</a>` : ''}
+            </div>
+        `;
     }
 
     async loadCustomArtists() {

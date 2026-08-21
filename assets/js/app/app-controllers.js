@@ -1479,6 +1479,9 @@ export const controllersMixin = {
     },
 
     updateRecommendations() {
+        // Saludo dinámico + frase del día
+        this.updateDashboardGreeting();
+
         // Update recommended lick
         if (this.licks.length > 0) {
             const randomLick = this.licks[Math.floor(Math.random() * this.licks.length)];
@@ -1486,17 +1489,63 @@ export const controllersMixin = {
         } else {
             document.getElementById('recommended-lick').textContent = 'Agrega tu primer lick';
         }
-        
-        // Update artist recommendation
-        const artists = [
-            'Oscar Peterson - Maestro del swing',
-            'Bill Evans - Pionero del jazz modal',
-            'Chucho Valdés - Titán del jazz cubano',
-            'Herbie Hancock - Innovador del jazz-funk'
-        ];
-        const randomArtist = artists[Math.floor(Math.random() * artists.length)];
-        document.getElementById('artist-recommendation').textContent = randomArtist;
+
+        // Artista del día — el mini render lo pone ArtistsManager.
         this.artistsManager?.renderDashboardCard();
+    },
+
+    updateDashboardGreeting() {
+        const greetingEl = document.getElementById('dashboard-greeting');
+        const briefEl = document.getElementById('dashboard-brief');
+        const taglineEl = document.getElementById('dashboard-tagline');
+        if (!greetingEl && !briefEl && !taglineEl) return;
+
+        const hour = new Date().getHours();
+        const partOfDay = hour < 5 ? 'Buenas noches'
+            : hour < 12 ? 'Buenos días'
+            : hour < 19 ? 'Buenas tardes'
+            : 'Buenas noches';
+
+        const username = this.getActiveUsername?.();
+        const name = username ? username.charAt(0).toUpperCase() + username.slice(1) : null;
+
+        if (greetingEl) {
+            greetingEl.textContent = name ? `${partOfDay}, ${name}` : `${partOfDay}`;
+        }
+
+        if (briefEl) {
+            const parts = [];
+            const stats = this.progressTracker?.getStats?.(this.licks?.length || 0);
+            if (stats?.currentStreak > 0) {
+                parts.push(`Racha: ${stats.currentStreak} ${stats.currentStreak === 1 ? 'día' : 'días'}`);
+            }
+            if (stats?.totalRecordings > 0) {
+                parts.push(`${stats.totalRecordings} ${stats.totalRecordings === 1 ? 'grabación' : 'grabaciones'}`);
+            }
+            const artistName = this.artistsManager?.getDailyArtistName?.();
+            if (artistName) parts.push(`Hoy: ${artistName}`);
+            briefEl.textContent = parts.length ? parts.join(' · ') : 'Primer día — arranquemos con una grabación corta.';
+        }
+
+        if (taglineEl) {
+            const prompts = [
+                '¿Podés tocar tu último lick a la mitad del tempo sin perder el groove?',
+                '¿Qué frase del artista del día te robarías hoy?',
+                '¿Cuántos silencios metés en un solo? Contalos.',
+                '¿Escuchaste bien tu última grabación, o solo la reprodujiste?',
+                'Elegí una tonalidad que no te guste y quedate ahí 10 minutos.',
+                '¿Podés tararear la línea del bajo mientras tocás la melodía?',
+                '¿Tu izquierda camina o solo acompaña?',
+                'Grabate, escuchá, borrá. ¿Qué cambiarías en la próxima toma?',
+                '¿Podés terminar una frase con silencio en vez de resolver?',
+                'Un montuno, tres tonalidades, cinco minutos. Ahora.',
+                '¿Cuántas veces repetiste la misma idea sin cambiarla?',
+                'Elegí un estándar y tocalo sin la mano derecha durante 8 compases.'
+            ];
+            const day = new Date();
+            const idx = (day.getUTCFullYear() * 366 + Math.floor((day - new Date(Date.UTC(day.getUTCFullYear(), 0, 1))) / 86400000)) % prompts.length;
+            taglineEl.textContent = prompts[idx];
+        }
     },
 
     // ===== PROGRESS SECTION =====
