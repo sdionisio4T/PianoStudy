@@ -9,6 +9,7 @@ import {
     insertPracticeSession, loadPracticeSessionsRange,
     skeletonHTML, errorHTML, ERR_MSG
 } from '../modules/SupabaseDataManager.js';
+import WaveSurfer from 'wavesurfer.js';
 
 export const controllersMixin = {
     setupStudyDropzone() {
@@ -1233,35 +1234,35 @@ export const controllersMixin = {
             </div>
         `;
         
+        this._destroyLickWavesurfers();
+
         licksList.innerHTML = controlsHtml + filteredLicks.map(lick => {
             const isSelected = this.selectedLicks.has(lick.id);
             const hasLocalBlob = lick.audioBlob instanceof Blob;
             const hasAudio = hasLocalBlob || !!lick.audioUrl;
-            
-            let audioElement = '';
-            if (hasLocalBlob) {
-                const url = this.createTrackedObjectURL(lick.audioBlob);
-                audioElement = `<audio controls data-object-url="${url}" src="${url}"></audio>`;
-            } else if (lick.audioUrl) {
-                audioElement = `<audio controls src="${lick.audioUrl}"></audio>`;
-            }
-            
+
+            const playerBlock = hasAudio
+                ? `<div class="lick-player" data-lick-id="${lick.id}">
+                        <button class="lick-wave-play" type="button" data-wave-play data-id="${lick.id}" aria-label="Reproducir">
+                            <i class="fas fa-play"></i>
+                        </button>
+                        <div class="lick-wave" data-wave-container data-id="${lick.id}"></div>
+                        <span class="lick-wave-time" data-wave-time data-id="${lick.id}">0:00</span>
+                   </div>`
+                : `<div class="lick-player lick-player--empty">Sin audio</div>`;
+
             return `
                 <div class="lick-card ${isSelected ? 'selected' : ''}" draggable="true" data-lick-id="${lick.id}">
                     <div class="lick-header">
-                        <input type="checkbox" class="lick-checkbox" 
-                               ${isSelected ? 'checked' : ''} 
+                        <input type="checkbox" class="lick-checkbox"
+                               ${isSelected ? 'checked' : ''}
                                data-id="${lick.id}">
                         <h4>${escapeHtml(lick.name)}</h4>
                         <span class="style-tag">${escapeHtml(lick.style)}</span>
-                        ${hasAudio ? '' : '<span class="style-tag">Sin audio</span>'}
                     </div>
                     <p>${escapeHtml(lick.description)}</p>
-                    ${audioElement}
+                    ${playerBlock}
                     <div class="lick-actions">
-                        <button class="btn-small" data-action="lick-play" data-id="${lick.id}" ${hasAudio ? '' : 'disabled'}>
-                            <i class="fas fa-play"></i> Reproducir
-                        </button>
                         <button class="btn-small" data-action="study-add" data-id="${lick.id}" ${hasAudio ? '' : 'disabled'}>
                             <i class="fas fa-plus"></i> Study
                         </button>
@@ -1286,10 +1287,77 @@ export const controllersMixin = {
             });
         });
 
-        licksList.querySelectorAll('audio[data-object-url]').forEach((el) => {
-            const url = el.getAttribute('data-object-url');
-            if (url) el.onended = () => this.cleanupObjectURL(url);
+        // Waveforms lazy: instanciar WaveSurfer solo cuando la card entra en viewport,
+        // así 100 licks no descargan sus 100 audios de golpe.
+        this._lickWavesurfers = new Map();
+        this._lickObserver = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (!entry.isIntersecting) return;
+                const container = entry.target;
+                const id = container.getAttribute('data-id');
+                if (this._lickWavesurfers.has(id)) {
+                    this._lickObserver.unobserve(container);
+                    return;
+                }
+                const lick = filteredLicks.find(l => String(l.id) === String(id));
+                if (!lick) return;
+                const url = lick.audioBlob instanceof Blob
+                    ? this.createTrackedObjectURL(lick.audioBlob)
+                    : lick.audioUrl;
+                if (!url) return;
+                const ws = WaveSurfer.create({
+                    container,
+                    url,
+                    waveColor: 'rgba(157, 78, 221, 0.35)',
+                    progressColor: '#9d4edd',
+                    cursorColor: '#00ff41',
+                    cursorWidth: 1,
+                    height: 32,
+                    barWidth: 2,
+                    barGap: 1,
+                    barRadius: 2,
+                    normalize: true,
+                });
+                const playBtn = licksList.querySelector(`[data-wave-play][data-id="${id}"] i`);
+                const timeEl = licksList.querySelector(`[data-wave-time][data-id="${id}"]`);
+                ws.on('play',  () => playBtn && (playBtn.className = 'fas fa-pause'));
+                ws.on('pause', () => playBtn && (playBtn.className = 'fas fa-play'));
+                ws.on('finish', () => playBtn && (playBtn.className = 'fas fa-play'));
+                ws.on('audioprocess', (t) => timeEl && (timeEl.textContent = this._formatWaveTime(t)));
+                ws.on('ready', () => timeEl && (timeEl.textContent = this._formatWaveTime(ws.getDuration())));
+                this._lickWavesurfers.set(id, ws);
+                this._lickObserver.unobserve(container);
+            });
+        }, { rootMargin: '150px' });
+
+        licksList.querySelectorAll('[data-wave-container]').forEach(c => this._lickObserver.observe(c));
+
+        // Click en el botón play → togglea el WaveSurfer correspondiente.
+        licksList.querySelectorAll('[data-wave-play]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const id = btn.getAttribute('data-id');
+                const ws = this._lickWavesurfers.get(id);
+                if (ws) ws.playPause();
+            });
         });
+    },
+
+    _formatWaveTime(secs) {
+        const s = Math.max(0, Math.floor(Number(secs) || 0));
+        const m = Math.floor(s / 60);
+        const r = s % 60;
+        return `${m}:${String(r).padStart(2, '0')}`;
+    },
+
+    _destroyLickWavesurfers() {
+        if (this._lickObserver) {
+            this._lickObserver.disconnect();
+            this._lickObserver = null;
+        }
+        if (this._lickWavesurfers) {
+            this._lickWavesurfers.forEach(ws => { try { ws.destroy(); } catch { /* noop */ } });
+            this._lickWavesurfers.clear();
+        }
     },
 
     filterLicks(style) {
@@ -1825,49 +1893,47 @@ export const controllersMixin = {
             mins: d.minutes
         }));
 
-        // Area fill
+        const LINE_COLOR = '#00ff85';
+        const AREA_TOP = 'rgba(0, 255, 133, 0.28)';
+        const AREA_BOTTOM = 'rgba(0, 255, 133, 0.0)';
+
+        // Area fill — cerrada bajo la curva, atravesando todos los puntos
         const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + h);
-        grad.addColorStop(0, 'rgba(102,126,234,0.3)');
-        grad.addColorStop(1, 'rgba(102,126,234,0.0)');
+        grad.addColorStop(0, AREA_TOP);
+        grad.addColorStop(1, AREA_BOTTOM);
         ctx.beginPath();
         ctx.moveTo(points[0].x, pad.top + h);
-        points.forEach(p => {
-            if (p.mins > 0) ctx.lineTo(p.x, p.y);
-            else ctx.lineTo(p.x, pad.top + h);
-        });
+        points.forEach(p => ctx.lineTo(p.x, p.y));
         ctx.lineTo(points[points.length - 1].x, pad.top + h);
         ctx.closePath();
         ctx.fillStyle = grad;
         ctx.fill();
 
-        // Line
+        // Line — continua sobre todos los días (los ceros van a la base)
         ctx.beginPath();
-        ctx.strokeStyle = '#667eea';
+        ctx.strokeStyle = LINE_COLOR;
         ctx.lineWidth = 2;
-        let started = false;
-        points.forEach(p => {
-            if (p.mins > 0) {
-                if (!started) { ctx.moveTo(p.x, p.y); started = true; }
-                else ctx.lineTo(p.x, p.y);
-            } else {
-                started = false;
-            }
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        points.forEach((p, i) => {
+            if (i === 0) ctx.moveTo(p.x, p.y);
+            else ctx.lineTo(p.x, p.y);
         });
         ctx.stroke();
 
-        // Points
+        // Points — solo destacamos los días con sesión
         points.forEach(p => {
             ctx.beginPath();
             if (p.mins > 0) {
                 ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-                ctx.fillStyle = '#667eea';
+                ctx.fillStyle = LINE_COLOR;
                 ctx.fill();
-                ctx.strokeStyle = '#fff';
+                ctx.strokeStyle = '#0d0d1a';
                 ctx.lineWidth = 2;
                 ctx.stroke();
             } else {
-                ctx.arc(p.x, pad.top + h, 2, 0, Math.PI * 2);
-                ctx.fillStyle = '#333';
+                ctx.arc(p.x, p.y, 1.6, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(0, 255, 133, 0.35)';
                 ctx.fill();
             }
         });
