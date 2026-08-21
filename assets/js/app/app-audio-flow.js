@@ -1348,12 +1348,12 @@ export const audioFlowMixin = {
         if (!container) return;
 
         if (!this.analysisChat.length) {
-            container.innerHTML = '<div class="chat-message assistant"><div class="chat-role">IA</div><div class="chat-text">Pregúntame sobre tu interpretación (tempo, dinámica, coordinación, etc.).</div></div>';
+            container.innerHTML = '<div class="chat-message assistant"><div class="chat-role">NeuralJam</div><div class="chat-text">Preguntame sobre tu interpretación (tempo, dinámica, coordinación, lo que quieras revisar de la grabación).</div></div>';
             return;
         }
 
         container.innerHTML = this.analysisChat.map(m => {
-            const role = m.role === 'user' ? 'Tú' : 'IA';
+            const role = m.role === 'user' ? 'Tú' : 'NeuralJam';
             const cls = m.role === 'user' ? 'user' : 'assistant';
             return `<div class="chat-message ${cls}"><div class="chat-role">${escapeHtml(role)}</div><div class="chat-text">${escapeHtml(m.text)}</div></div>`;
         }).join('');
@@ -1368,6 +1368,7 @@ export const audioFlowMixin = {
         }
 
         const input = document.getElementById('analysis-chat-input');
+        const sendBtn = document.getElementById('analysis-chat-send');
         const question = String(input?.value || '').trim();
         if (!question) return;
 
@@ -1375,13 +1376,38 @@ export const audioFlowMixin = {
         if (input) input.value = '';
         this.renderAnalysisChat();
 
+        // Indicador visual "NeuralJam escribiendo…" — misma estética que el
+        // widget de la esquina (3 puntitos cyan pulsando). Se agrega al DOM
+        // fuera de analysisChat[] para no persistirlo, y se quita apenas
+        // llegue la respuesta (o el error).
+        const typingEl = this._showAnalysisTyping();
+        if (sendBtn) sendBtn.disabled = true;
+        if (input) input.disabled = true;
+
         const { audioAnalysis, aiAnalysis } = this.currentAnalysis;
         const engine = this.aiEngine || new AIAnalysisEngine();
         // Pasamos historial excluyendo la pregunta recién agregada (se pasa aparte).
         const historyForModel = this.analysisChat.slice(0, -1);
-        const answer = await engine.answerQuestion(audioAnalysis, aiAnalysis, question, historyForModel);
-        this.analysisChat.push({ role: 'assistant', text: String(answer || '') });
-        this.renderAnalysisChat();
+        try {
+            const answer = await engine.answerQuestion(audioAnalysis, aiAnalysis, question, historyForModel);
+            this.analysisChat.push({ role: 'assistant', text: String(answer || '') });
+        } finally {
+            typingEl?.remove();
+            if (sendBtn) sendBtn.disabled = false;
+            if (input) { input.disabled = false; input.focus(); }
+            this.renderAnalysisChat();
+        }
+    },
+
+    _showAnalysisTyping() {
+        const container = document.getElementById('analysis-chat-messages');
+        if (!container) return null;
+        const el = document.createElement('div');
+        el.className = 'chat-typing';
+        el.innerHTML = '<span class="chat-typing-label">NEURALJAM</span><span class="chat-typing-dots"><span></span><span></span><span></span></span>';
+        container.appendChild(el);
+        container.scrollTop = container.scrollHeight;
+        return el;
     },
 
     // NOTA: playAnalysisSegment fue removido — el reproductor del análisis ahora

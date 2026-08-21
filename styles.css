@@ -1668,6 +1668,71 @@
     flex-shrink: 0;
 }
 
+/* NeuralJam orb — representación mini del núcleo cyan pulsante.
+   Se usa en títulos ("Pregúntale a NeuralJam") como firma visual del
+   asistente, con la misma estética que la mascota (assets/js/modules/NeuralJamChatbot.js). */
+.neuraljam-orb {
+    --nj-cyan: #4FD1FF;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: transparent;
+    position: relative;
+    flex-shrink: 0;
+    line-height: 1;
+}
+.neuraljam-orb::before {
+    /* Halo difuminado */
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(79, 209, 255, 0.35) 0%, rgba(79, 209, 255, 0) 65%);
+    animation: neuraljamHalo 2.8s ease-out infinite;
+    pointer-events: none;
+}
+.neuraljam-orb::after {
+    /* Núcleo sólido */
+    content: '';
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--nj-cyan);
+    box-shadow: 0 0 10px var(--nj-cyan);
+    animation: neuraljamBreathe 3.4s ease-in-out infinite;
+}
+
+/* Variante más grande — se usa dentro del título "Pregúntale a NeuralJam"
+   del análisis para que la firma visual pese más al lado del texto. */
+.analysis-section h3 > .neuraljam-orb {
+    width: 46px;
+    height: 46px;
+    margin-right: 0.15rem;
+}
+.analysis-section h3 > .neuraljam-orb::after {
+    width: 20px;
+    height: 20px;
+    box-shadow: 0 0 14px var(--nj-cyan);
+}
+.analysis-section h3 > .neuraljam-orb::before {
+    background: radial-gradient(circle, rgba(79, 209, 255, 0.42) 0%, rgba(79, 209, 255, 0) 65%);
+}
+@keyframes neuraljamBreathe {
+    0%, 100% { transform: scale(1);    box-shadow: 0 0 8px var(--nj-cyan); }
+    50%      { transform: scale(1.15); box-shadow: 0 0 16px var(--nj-cyan); }
+}
+@keyframes neuraljamHalo {
+    0%   { transform: scale(0.85); opacity: 0.7; }
+    100% { transform: scale(1.35); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .neuraljam-orb::before,
+    .neuraljam-orb::after { animation: none; }
+}
+
 .summary-cards {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -2050,21 +2115,72 @@
 .chat-message .chat-role {
     color: var(--text-secondary);
     font-size: 0.8rem;
+    letter-spacing: 0.06em;
+}
+
+.chat-message.assistant .chat-role {
+    color: #4FD1FF;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-size: 0.72rem;
 }
 
 .chat-message .chat-text {
     color: var(--text-primary);
     line-height: 1.6;
-    background: rgba(102, 126, 234, 0.08);
-    border: 1px solid rgba(102, 126, 234, 0.2);
+    background: rgba(79, 209, 255, 0.06);
+    border: 1px solid rgba(79, 209, 255, 0.18);
     border-radius: 8px;
     padding: 0.75rem 0.9rem;
     white-space: pre-wrap;
 }
 
+/* Respuesta de NeuralJam — misma estética que el widget de la esquina
+   (assets/js/modules/NeuralJamChatbot.js .njc-msg--bot): fondo cyan casi
+   negro con acento izquierdo cyan encendido, evocando emisión. */
 .chat-message.assistant .chat-text {
-    background: rgba(0, 255, 65, 0.06);
-    border-color: rgba(0, 255, 65, 0.2);
+    color: #cfeeff;
+    background: rgba(79, 209, 255, 0.04);
+    border: 1px solid rgba(79, 209, 255, 0.14);
+    border-left: 2px solid rgba(79, 209, 255, 0.55);
+    box-shadow: inset 0 0 24px rgba(79, 209, 255, 0.04);
+}
+
+/* Indicador "NeuralJam escribiendo…" — 3 puntitos cyan pulsando,
+   misma estética que el widget de la esquina (.njc-typing). */
+.chat-typing {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.4rem 0.2rem;
+    opacity: 0.9;
+}
+.chat-typing-label {
+    color: #4FD1FF;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-size: 0.72rem;
+}
+.chat-typing-dots {
+    display: inline-flex;
+    gap: 5px;
+}
+.chat-typing-dots span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #4FD1FF;
+    box-shadow: 0 0 6px #4FD1FF;
+    animation: chatTypingDot 1.2s ease-in-out infinite;
+}
+.chat-typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+.chat-typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes chatTypingDot {
+    0%, 60%, 100% { opacity: 0.25; transform: scale(0.85); }
+    30%           { opacity: 1;    transform: scale(1.15); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .chat-typing-dots span { animation: none; opacity: 0.7; }
 }
 
 .chat-input-row {
