@@ -13,7 +13,7 @@
                    style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; 
                    font-src 'self' https://cdnjs.cloudflare.com https://fonts.gstatic.com;
                    img-src 'self' data: https://i.ytimg.com https://upload.wikimedia.org https://wsrv.nl; 
-                   connect-src 'self' https://cdn.jsdelivr.net https://unpkg.com https://wdbeucosldkiphnygcce.supabase.co wss://wdbeucosldkiphnygcce.supabase.co https://generativelanguage.googleapis.com; 
+                   connect-src 'self' blob: https://cdn.jsdelivr.net https://unpkg.com https://wdbeucosldkiphnygcce.supabase.co wss://wdbeucosldkiphnygcce.supabase.co https://generativelanguage.googleapis.com;
                    frame-src https://www.youtube.com https://www.youtube-nocookie.com; 
                    media-src 'self' blob: https://wdbeucosldkiphnygcce.supabase.co;">
     <title>PianoStudy - Estudio para Pianistas</title>
@@ -196,6 +196,9 @@
                         <button id="refresh-devices" class="btn-small">
                             <i class="fas fa-sync"></i> Actualizar
                         </button>
+                        <button id="mic-toggle-btn" class="btn-small mic-toggle" type="button" aria-pressed="false" title="Activar/desactivar micrófono">
+                            <i class="fas fa-microphone-slash"></i> Activar micrófono
+                        </button>
                     </div>
 
                     <!-- Recording Controls -->
@@ -206,16 +209,50 @@
                                 <span class="recording-text">GRABANDO</span>
                                 <span class="recording-time" id="recording-time">00:00</span>
                             </div>
-                            <canvas id="waveform" width="800" height="200"></canvas>
-                            <div class="level-meters">
-                                <div class="level-meter">
-                                    <div class="level-bar" id="left-level"></div>
-                                    <span>L</span>
+                            <div id="live-monitor">
+                                <canvas id="waveform" width="800" height="200"></canvas>
+                                <div class="level-meters">
+                                    <div class="level-meter">
+                                        <div class="level-bar" id="left-level"></div>
+                                        <span>L</span>
+                                    </div>
+                                    <div class="level-meter">
+                                        <div class="level-bar" id="right-level"></div>
+                                        <span>R</span>
+                                    </div>
                                 </div>
-                                <div class="level-meter">
-                                    <div class="level-bar" id="right-level"></div>
-                                    <span>R</span>
+                                <div class="visualizer-label">Monitor del micrófono (en vivo)</div>
+                            </div>
+                            <div id="record-review" class="hidden">
+                                <div class="record-review-header">
+                                    <span class="visualizer-label">Última grabación</span>
+                                    <button id="record-review-play" class="record-review-play" type="button" aria-label="Reproducir">
+                                        <i class="fas fa-play"></i>
+                                    </button>
+                                    <span id="record-review-time" class="record-review-time">0:00 / 0:00</span>
+                                    <button id="record-review-close" class="record-review-close" type="button" title="Volver al monitor del micrófono" aria-label="Cerrar reproductor">
+                                        <i class="fas fa-times"></i>
+                                    </button>
                                 </div>
+                                <div class="record-review-controls">
+                                    <button id="record-review-loop" class="record-review-toggle" type="button" title="Reproducir en bucle" aria-pressed="false">
+                                        <i class="fas fa-repeat"></i> Loop
+                                    </button>
+                                    <label class="record-review-speed">
+                                        <span>Velocidad</span>
+                                        <input id="record-review-speed" type="range" min="0.5" max="1.5" step="0.05" value="1">
+                                        <span id="record-review-speed-label">1.00x</span>
+                                        <button id="record-review-speed-reset" class="record-review-speed-reset" type="button" title="Restablecer a 1.00x">
+                                            <i class="fas fa-undo"></i>
+                                        </button>
+                                    </label>
+                                    <button id="record-review-clear-region" class="btn-small" type="button" title="Limpiar selección" disabled>
+                                        <i class="fas fa-eraser"></i> Selección
+                                    </button>
+                                    <span class="record-review-hint">Arrastra sobre la onda para seleccionar un fragmento</span>
+                                </div>
+                                <div id="record-review-timeline"></div>
+                                <div id="record-review-wave"></div>
                             </div>
                         </div>
 
@@ -260,9 +297,24 @@
                                 <i class="fas fa-trash"></i> Borrar todas
                             </button>
                         </div>
+                        <div class="temp-filter-bar">
+                            <label class="temp-filter-field">
+                                <span>Desde</span>
+                                <input type="text" id="temp-filter-from" placeholder="YYYY-MM-DD" readonly>
+                            </label>
+                            <label class="temp-filter-field">
+                                <span>Hasta</span>
+                                <input type="text" id="temp-filter-to" placeholder="YYYY-MM-DD" readonly>
+                            </label>
+                            <button id="temp-filter-clear" class="btn-small" type="button" title="Limpiar filtro">
+                                <i class="fas fa-times"></i> Limpiar
+                            </button>
+                            <span id="temp-filter-count" class="temp-filter-count"></span>
+                        </div>
                         <div id="temp-recordings" class="temp-recordings-list">
                             <p class="no-recordings">No hay grabaciones aún</p>
                         </div>
+                        <div id="temp-pagination" class="temp-pagination"></div>
                     </div>
                 </div>
 
@@ -290,56 +342,69 @@
                         </select>
                     </div>
 
-                    <div id="study-player" class="study-player">
-                        <div class="study-player-header">
-                            <h3><i class="fas fa-repeat"></i> Study Player (Loop)</h3>
-                            <div class="study-player-actions">
-                                <div class="study-speed">
-                                    <label for="study-speed">Velocidad</label>
-                                    <input id="study-speed" type="range" min="0.5" max="1.5" step="0.05" value="1" />
-                                    <span id="study-speed-label">1.00x</span>
-                                </div>
-                                <button class="btn-small" data-action="study-toggle-loop" data-value="on">
-                                    <i class="fas fa-redo"></i> Loop: ON
-                                </button>
-                                <button class="btn-small btn-danger" data-action="study-clear">
-                                    <i class="fas fa-trash"></i> Limpiar cola
-                                </button>
-                            </div>
-                        </div>
+                    <div class="temp-filter-bar licks-filter-bar">
+                        <label class="temp-filter-field">
+                            <span>Buscar</span>
+                            <input type="text" id="licks-filter-text" placeholder="Nombre del lick…">
+                        </label>
+                        <label class="temp-filter-field">
+                            <span>Desde</span>
+                            <input type="text" id="licks-filter-from" placeholder="YYYY-MM-DD" readonly>
+                        </label>
+                        <label class="temp-filter-field">
+                            <span>Hasta</span>
+                            <input type="text" id="licks-filter-to" placeholder="YYYY-MM-DD" readonly>
+                        </label>
+                        <button id="licks-filter-clear" class="btn-small" type="button" title="Limpiar filtros">
+                            <i class="fas fa-times"></i> Limpiar
+                        </button>
+                        <span id="licks-filter-count" class="temp-filter-count"></span>
+                    </div>
 
-                        <div class="study-now-playing">
-                            <div class="study-title">
-                                <span class="label">Ahora:</span>
-                                <strong id="study-now-title">Arrastra un lick aquí</strong>
-                            </div>
-                            <div class="study-controls">
-                                <button class="btn-small" data-action="study-prev">
-                                    <i class="fas fa-step-backward"></i>
-                                </button>
-                                <button class="btn-primary" data-action="study-play">
-                                    <i class="fas fa-play"></i> Play
-                                </button>
-                                <button class="btn-small" data-action="study-pause">
-                                    <i class="fas fa-pause"></i>
-                                </button>
-                                <button class="btn-small" data-action="study-next">
-                                    <i class="fas fa-step-forward"></i>
-                                </button>
-                            </div>
+                    <div id="lick-review" class="lick-review has-placeholder">
+                        <div class="record-review-header">
+                            <span class="visualizer-label">Lick</span>
+                            <button id="lick-review-restart" class="record-review-restart" type="button" title="Ir al inicio" aria-label="Ir al inicio">
+                                <i class="fas fa-backward-step"></i>
+                            </button>
+                            <button id="lick-review-play" class="record-review-play" type="button" aria-label="Reproducir">
+                                <i class="fas fa-play"></i>
+                            </button>
+                            <span id="lick-review-time" class="record-review-time">0:00 / 0:00</span>
+                            <button id="lick-review-close" class="record-review-close" type="button" title="Cerrar reproductor" aria-label="Cerrar reproductor">
+                                <i class="fas fa-times"></i>
+                            </button>
                         </div>
-
-                        <div id="study-dropzone" class="study-dropzone">
-                            <div class="study-dropzone-hint">
-                                Arrastra licks aquí para crear una cola de estudio
+                        <div class="record-review-controls">
+                            <button id="lick-review-loop" class="record-review-toggle" type="button" title="Reproducir en bucle" aria-pressed="false">
+                                <i class="fas fa-repeat"></i> Loop
+                            </button>
+                            <label class="record-review-speed">
+                                <span>Velocidad</span>
+                                <input id="lick-review-speed" type="range" min="0.5" max="1.5" step="0.05" value="1">
+                                <span id="lick-review-speed-label">1.00x</span>
+                                <button id="lick-review-speed-reset" class="record-review-speed-reset" type="button" title="Restablecer a 1.00x">
+                                    <i class="fas fa-undo"></i>
+                                </button>
+                            </label>
+                            <button id="lick-review-clear-region" class="btn-small" type="button" title="Limpiar selección" disabled>
+                                <i class="fas fa-eraser"></i> Selección
+                            </button>
+                            <span class="record-review-hint">Arrastra sobre la onda para seleccionar un fragmento</span>
+                        </div>
+                        <div id="lick-review-timeline"></div>
+                        <div id="lick-review-wave">
+                            <div class="lick-review-empty">
+                                <i class="fas fa-hand-pointer"></i>
+                                <span>Haz click sobre el nombre de un lick, o en su botón <i class="fas fa-expand"></i> Abrir, para cargarlo aquí y navegar la onda.</span>
                             </div>
-                            <div id="study-queue" class="study-queue"></div>
                         </div>
                     </div>
 
                     <div id="licks-list" class="licks-list">
                         <!-- Licks will be loaded here -->
                     </div>
+                    <div id="licks-pagination" class="temp-pagination"></div>
                 </div>
 
                 <!-- Phrases Section -->
@@ -387,15 +452,29 @@
                                 <span id="total-time" class="total-time">0:00</span>
                             </div>
 
-                            <div class="mark-controls">
-                                <button id="mark-start-btn" class="btn-secondary">
+                            <p class="mark-help">
+                                <i class="fas fa-info-circle"></i>
+                                Pausa el video donde empieza la frase → pulsa <strong>Marcar Inicio</strong> → adelanta hasta el final → pulsa <strong>Marcar Final</strong> → luego <strong>Reproducir Segmento</strong>.
+                            </p>
+                            <div id="mark-controls" class="mark-controls">
+                                <button id="mark-start-btn" class="btn-secondary" title="Marca el punto actual del video como INICIO del segmento">
                                     <i class="fas fa-flag"></i> Marcar Inicio
                                 </button>
-                                <button id="mark-end-btn" class="btn-secondary">
+                                <button id="mark-end-btn" class="btn-secondary" title="Marca el punto actual del video como FINAL del segmento">
                                     <i class="fas fa-flag-checkered"></i> Marcar Final
                                 </button>
-                                <button id="play-segment-btn" class="btn-primary" disabled>
+                                <button id="play-segment-btn" class="btn-primary" disabled title="Marca inicio y final primero para poder reproducir el segmento">
                                     <i class="fas fa-play"></i> Reproducir Segmento
+                                </button>
+                            </div>
+
+                            <div id="phrase-saved-banner" class="phrase-saved-banner hidden">
+                                <div class="phrase-saved-info">
+                                    <i class="fas fa-check-circle"></i>
+                                    <span>Frase guardada. Cuando quieras cortar otra, empieza una nueva.</span>
+                                </div>
+                                <button id="new-phrase-btn" class="btn-primary" type="button">
+                                    <i class="fas fa-plus"></i> Crear frase nueva
                                 </button>
                             </div>
 
@@ -409,7 +488,7 @@
                             </div>
                         </div>
 
-                        <div class="save-phrase-section">
+                        <div id="save-phrase-section" class="save-phrase-section">
                             <h4>Guardar Frase Musical</h4>
                             <div class="phrase-form">
                                 <input type="text" 
@@ -707,7 +786,7 @@
                         </div>
 
                         <div class="analysis-section">
-                            <h3><i class="fas fa-comments"></i> Pregúntale a la IA</h3>
+                            <h3><span class="neuraljam-orb" aria-hidden="true"></span> Pregúntale a NeuralJam</h3>
                             <div class="analysis-chat">
                                 <div id="analysis-chat-messages" class="chat-messages"></div>
                                 <div class="chat-input-row">
@@ -1150,5 +1229,6 @@
 
     <script type="module" src="assets/js/modules/auth-ui.js"></script>
     <script type="module" src="assets/js/app/app-init.js"></script>
+    <script type="module" src="assets/js/modules/NeuralJamChatbot.js"></script>
 </body>
 </html>

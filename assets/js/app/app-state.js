@@ -25,6 +25,34 @@ export function initState(app) {
         app.selectedLicks = new Set();
         app.currentRecordingDuration = null;
 
+        // Grabar: WaveSurfer "review" del audio recién grabado + mapa de mini WS por grabación temporal.
+        app._recordReviewWs = null;
+        app._recordReviewObjectUrl = null;
+        app._tempWavesurfers = null;
+        app._tempWaveObjectUrls = null;
+        app._tempWaveObserver = null;
+
+        // Licks: reproductor grande con onda navegable (arriba del listado).
+        app._lickReviewWs = null;
+        app._lickReviewObjectUrl = null;
+        app._lickReviewRegions = null;
+        app._lickReviewState = null;
+
+        // Licks: filtros (texto + fecha) y paginación.
+        app._licksFilterText = '';
+        app._licksFilterFrom = null;
+        app._licksFilterTo = null;
+        app._licksPage = 1;
+        app._licksPageSize = 9;
+        app._licksFilterFromPicker = null;
+        app._licksFilterToPicker = null;
+
+        // Grabaciones Temporales: filtro por fecha (YYYY-MM-DD | null) y paginación.
+        app._tempFilterFrom = null;
+        app._tempFilterTo = null;
+        app._tempPage = 1;
+        app._tempPageSize = 8;
+
         // Phrase editor (WaveSurfer.js)
         app.editorWavesurfer = null;
         app.editorRegions = null;

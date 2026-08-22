@@ -21,6 +21,9 @@ import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
 import TimelinePlugin from 'wavesurfer.js/dist/plugins/timeline.esm.js';
 import ZoomPlugin from 'wavesurfer.js/dist/plugins/zoom.esm.js';
 import HoverPlugin from 'wavesurfer.js/dist/plugins/hover.esm.js';
+import flatpickr from 'flatpickr';
+import { Spanish } from 'flatpickr/dist/l10n/es.js';
+import 'flatpickr/dist/flatpickr.min.css';
 
 export const audioFlowMixin = {
     initializeAIEngine() {
@@ -1614,12 +1617,40 @@ export const audioFlowMixin = {
             this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
             this.analyser = this.audioContext.createAnalyser();
             this.analyser.fftSize = 256;
-            
+
             await this.refreshAudioDevices();
             this.startVisualization();
+
+            // Mic OFF por defecto — el usuario lo activa explícitamente con #mic-toggle-btn
+            // (o queda activado automáticamente al pulsar Grabar).
+            this._updateMicToggleUI(false);
         } catch (error) {
             console.error('Error initializing audio context:', error);
         }
+    },
+
+    async toggleMic() {
+        if (this.currentStream) {
+            // Desactivar mic.
+            try { this.currentStream.getTracks().forEach(t => t.stop()); } catch { /* noop */ }
+            this.currentStream = null;
+            if (this.microphone) { try { this.microphone.disconnect(); } catch { /* noop */ } this.microphone = null; }
+            this._updateMicToggleUI(false);
+            return;
+        }
+        const deviceId = document.getElementById('audio-device')?.value || '';
+        await this.selectAudioDevice(deviceId);
+        this._updateMicToggleUI(!!this.currentStream);
+    },
+
+    _updateMicToggleUI(active) {
+        const btn = document.getElementById('mic-toggle-btn');
+        if (!btn) return;
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+        btn.classList.toggle('is-active', !!active);
+        btn.innerHTML = active
+            ? '<i class="fas fa-microphone"></i> Micrófono ON'
+            : '<i class="fas fa-microphone-slash"></i> Activar micrófono';
     },
 
     async refreshAudioDevices() {
@@ -1651,22 +1682,21 @@ export const audioFlowMixin = {
     },
 
     async selectAudioDevice(deviceId) {
-        if (!deviceId) return;
-
         if (this.currentStream) {
             this.currentStream.getTracks().forEach(track => track.stop());
             this.currentStream = null;
         }
-        
+
+        // deviceId vacío/undefined = usar micrófono por defecto.
+        const audio = {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+        };
+        if (deviceId) audio.deviceId = { exact: deviceId };
+
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    deviceId: deviceId,
-                    echoCancellation: false,
-                    noiseSuppression: false,
-                    autoGainControl: false
-                }
-            });
+            const stream = await navigator.mediaDevices.getUserMedia({ audio });
             
             if (this.microphone) {
                 this.microphone.disconnect();
@@ -1695,6 +1725,17 @@ export const audioFlowMixin = {
     },
 
     async startRecording() {
+        // Si viene un review de la grabación anterior, ocultarlo y volver al monitor en vivo.
+        this._hideRecordReview();
+
+        // Si el usuario no activó el mic explícitamente, activarlo aquí para que
+        // el visualizador se mueva mientras graba.
+        if (!this.currentStream) {
+            const deviceId = document.getElementById('audio-device')?.value || '';
+            await this.selectAudioDevice(deviceId);
+            this._updateMicToggleUI(!!this.currentStream);
+        }
+
         try {
             const deviceId = document.getElementById('audio-device').value;
             
@@ -1732,13 +1773,14 @@ export const audioFlowMixin = {
                 document.getElementById('cut-phrases-btn').disabled = false;
                 const analyzeBtn = document.getElementById('analyze-recording-btn');
                 if (analyzeBtn) analyzeBtn.disabled = false;
-                
+
+                // Convertir el visualizador en vivo en un WaveSurfer de la última grabación (scrubable).
+                // El WaveSurfer del cuadro grande reemplaza al modal antiguo showRecordingList().
+                this._showRecordReviewWave(audioBlob);
+
                 // Agregar a la lista de grabaciones temporales
                 this.addToTempRecordings(audioBlob);
-                
-                // Mostrar lista de grabaciones recientes
-                this.showRecordingList();
-                
+
                 // Detener el contador de tiempo
                 this.stopRecordingTimer();
             };
@@ -1760,6 +1802,242 @@ export const audioFlowMixin = {
         } catch (error) {
             console.error('Error starting recording:', error);
             this.showNotification('Error al iniciar grabación. Verifica los permisos del micrófono.', 'error');
+        }
+    },
+
+    _showRecordReviewWave(audioBlob, label = 'Última grabación') {
+        const liveMonitor = document.getElementById('live-monitor');
+        const review = document.getElementById('record-review');
+        const waveEl = document.getElementById('record-review-wave');
+        const timelineEl = document.getElementById('record-review-timeline');
+        const timeEl = document.getElementById('record-review-time');
+        const playBtn = document.getElementById('record-review-play');
+        const loopBtn = document.getElementById('record-review-loop');
+        const speedSlider = document.getElementById('record-review-speed');
+        const speedLabel = document.getElementById('record-review-speed-label');
+        const clearRegionBtn = document.getElementById('record-review-clear-region');
+        const labelEl = review?.querySelector('.visualizer-label');
+        if (!waveEl || !review || !liveMonitor || !audioBlob) return;
+        if (labelEl) labelEl.textContent = label;
+
+        // Limpiar review anterior si existía.
+        this._destroyRecordReviewWs();
+
+        // Pausar mini WS de la lista para que solo suene uno a la vez.
+        this._tempWavesurfers?.forEach(ws => { try { if (ws.isPlaying?.()) ws.pause(); } catch { /* noop */ } });
+
+        liveMonitor.classList.add('hidden');
+        review.classList.remove('hidden');
+
+        const url = this.createTrackedObjectURL(audioBlob);
+        this._recordReviewObjectUrl = url;
+
+        // Esperar al reflow: si el contenedor pasó de display:none a visible, WaveSurfer
+        // necesita que #record-review-wave ya tenga clientWidth > 0 antes de crearse,
+        // si no pinta una onda de ancho 0 y no se ve nada.
+        requestAnimationFrame(() => {
+            waveEl.innerHTML = '';
+            if (timelineEl) timelineEl.innerHTML = '';
+
+            const regionsPlugin = RegionsPlugin.create();
+            const hoverPlugin = HoverPlugin.create({
+                lineColor: '#3ba869',
+                lineWidth: 2,
+                labelBackground: 'rgba(59, 168, 105, 0.9)',
+                labelColor: '#fff',
+                labelSize: '11px',
+            });
+            const plugins = [regionsPlugin, hoverPlugin];
+            if (timelineEl) plugins.push(TimelinePlugin.create({ container: timelineEl, height: 14 }));
+
+            let ws;
+            try {
+                ws = WaveSurfer.create({
+                    container: waveEl,
+                    url,
+                    waveColor: 'rgba(59, 168, 105, 0.55)',
+                    progressColor: '#3ba869',
+                    cursorColor: '#00ff41',
+                    cursorWidth: 1,
+                    height: 96,
+                    barWidth: 2,
+                    barGap: 1,
+                    barRadius: 2,
+                    normalize: true,
+                    plugins,
+                });
+            } catch (e) {
+                console.error('Record review WaveSurfer create error:', e);
+                this.showNotification('No se pudo cargar la grabación en el visualizador', 'error');
+                return;
+            }
+
+            // Estado local para region/loop/velocidad.
+            const state = {
+                region: null,
+                loop: loopBtn?.getAttribute('aria-pressed') === 'true',
+                rate: Number(speedSlider?.value) || 1,
+            };
+            this._recordReviewState = state;
+
+            const setTime = (cur) => {
+                if (!timeEl) return;
+                const total = ws.getDuration();
+                timeEl.textContent = `${this._formatWaveTime(cur)} / ${this._formatWaveTime(total)}`;
+            };
+
+            ws.on('play',   () => playBtn && (playBtn.querySelector('i').className = 'fas fa-pause'));
+            ws.on('pause',  () => playBtn && (playBtn.querySelector('i').className = 'fas fa-play'));
+            ws.on('finish', () => { if (playBtn) playBtn.querySelector('i').className = 'fas fa-play'; setTime(0); });
+            ws.on('audioprocess', (t) => {
+                setTime(t);
+                // Región SIEMPRE limita cuando existe (solo se escucha lo seleccionado).
+                // Loop controla si al llegar al final se repite (región o toda la pista).
+                if (state.region && t >= state.region.end) {
+                    if (state.loop) ws.setTime(state.region.start);
+                    else { ws.pause(); ws.setTime(state.region.start); }
+                } else if (!state.region && state.loop) {
+                    const total = ws.getDuration();
+                    if (total && t >= total - 0.05) ws.setTime(0);
+                }
+            });
+            ws.on('ready', () => {
+                setTime(0);
+                try { ws.setPlaybackRate(state.rate, true); } catch { /* noop */ }
+            });
+            ws.on('error', (err) => {
+                console.error('Record review WaveSurfer load error:', err);
+                this.showNotification('Error al decodificar el audio', 'error');
+            });
+
+            // Selección con drag: crea una región (verde translúcido). Solo una región activa a la vez.
+            regionsPlugin.enableDragSelection({
+                color: 'rgba(59, 168, 105, 0.20)',
+            });
+            const setActiveRegion = (region) => {
+                if (state.region && state.region !== region) {
+                    try { state.region.remove(); } catch { /* noop */ }
+                }
+                state.region = region;
+                if (clearRegionBtn) clearRegionBtn.disabled = !region;
+            };
+            regionsPlugin.on('region-created', (region) => setActiveRegion(region));
+            regionsPlugin.on('region-updated', (region) => { state.region = region; });
+            regionsPlugin.on('region-clicked', (region, e) => {
+                e?.stopPropagation?.();
+                ws.setTime(region.start);
+                ws.play();
+            });
+
+            // Play/Pause principal: si hay región y no estás dentro, arranca desde su inicio.
+            if (playBtn) {
+                playBtn.onclick = () => {
+                    try {
+                        if (ws.isPlaying()) {
+                            ws.pause();
+                            return;
+                        }
+                        // Si hay región y el cursor está fuera, saltar al inicio de la región.
+                        if (state.region) {
+                            const now = ws.getCurrentTime();
+                            if (now < state.region.start || now >= state.region.end) {
+                                ws.setTime(state.region.start);
+                            }
+                        }
+                        ws.play();
+                    } catch { /* noop */ }
+                };
+            }
+
+            // Toggle Loop.
+            if (loopBtn) {
+                loopBtn.onclick = () => {
+                    state.loop = !state.loop;
+                    loopBtn.setAttribute('aria-pressed', state.loop ? 'true' : 'false');
+                    loopBtn.classList.toggle('is-active', state.loop);
+                };
+            }
+
+            // Velocidad.
+            const applyRate = (r) => {
+                state.rate = r;
+                if (speedSlider) speedSlider.value = String(r);
+                if (speedLabel) speedLabel.textContent = `${r.toFixed(2)}x`;
+                try { ws.setPlaybackRate(r, true); } catch { /* noop */ }
+            };
+            if (speedSlider) {
+                speedSlider.oninput = () => applyRate(Number(speedSlider.value) || 1);
+                if (speedLabel) speedLabel.textContent = `${state.rate.toFixed(2)}x`;
+            }
+            const speedResetBtn = document.getElementById('record-review-speed-reset');
+            if (speedResetBtn) {
+                speedResetBtn.onclick = () => applyRate(1);
+            }
+
+            // Limpiar selección.
+            if (clearRegionBtn) {
+                clearRegionBtn.onclick = () => {
+                    if (state.region) {
+                        try { state.region.remove(); } catch { /* noop */ }
+                        state.region = null;
+                    }
+                    clearRegionBtn.disabled = true;
+                };
+                clearRegionBtn.disabled = true;
+            }
+
+            this._recordReviewWs = ws;
+            this._recordReviewRegions = regionsPlugin;
+        });
+    },
+
+    _destroyRecordReviewWs() {
+        if (this._recordReviewWs) {
+            try { this._recordReviewWs.destroy(); } catch { /* noop */ }
+            this._recordReviewWs = null;
+        }
+        if (this._recordReviewObjectUrl) {
+            this.cleanupObjectURL(this._recordReviewObjectUrl);
+            this._recordReviewObjectUrl = null;
+        }
+        this._recordReviewRegions = null;
+        this._recordReviewState = null;
+
+        // Reset UI state de los controles del cuadro grande.
+        const loopBtn = document.getElementById('record-review-loop');
+        const speedSlider = document.getElementById('record-review-speed');
+        const speedLabel = document.getElementById('record-review-speed-label');
+        const clearRegionBtn = document.getElementById('record-review-clear-region');
+        if (loopBtn) {
+            loopBtn.setAttribute('aria-pressed', 'false');
+            loopBtn.classList.remove('is-active');
+            loopBtn.onclick = null;
+        }
+        if (speedSlider) {
+            speedSlider.value = '1';
+            speedSlider.oninput = null;
+        }
+        if (speedLabel) speedLabel.textContent = '1.00x';
+        if (clearRegionBtn) {
+            clearRegionBtn.disabled = true;
+            clearRegionBtn.onclick = null;
+        }
+        const speedResetBtn = document.getElementById('record-review-speed-reset');
+        if (speedResetBtn) speedResetBtn.onclick = null;
+    },
+
+    _hideRecordReview() {
+        this._destroyRecordReviewWs();
+        const liveMonitor = document.getElementById('live-monitor');
+        const review = document.getElementById('record-review');
+        const timeEl = document.getElementById('record-review-time');
+        const playBtn = document.getElementById('record-review-play');
+        if (review) review.classList.add('hidden');
+        if (liveMonitor) liveMonitor.classList.remove('hidden');
+        if (timeEl) timeEl.textContent = '0:00 / 0:00';
+        if (playBtn) {
+            const icon = playBtn.querySelector('i');
+            if (icon) icon.className = 'fas fa-play';
         }
     },
 
@@ -1825,6 +2103,7 @@ export const audioFlowMixin = {
             name: r.name,
             blob: localBlobs[r.id] || null,
             duration: r.duration,
+            createdAt: r.created_at || null,
             filePath: r.file_path,
             uploading: false
         }));
@@ -1846,6 +2125,7 @@ export const audioFlowMixin = {
             blob: audioBlob,
             duration,
             filePath: null,
+            createdAt: new Date().toISOString(),
             uploading: true
         };
         this.tempRecordings.unshift(localRec);
@@ -1869,6 +2149,7 @@ export const audioFlowMixin = {
                 blob: audioBlob,
                 duration: data.duration,
                 filePath: data.file_path,
+                createdAt: data.created_at || localRec.createdAt,
                 uploading: false
             };
         }
@@ -1879,6 +2160,12 @@ export const audioFlowMixin = {
     updateTempRecordingsList() {
         const container = document.getElementById('temp-recordings');
         const deleteAllBtn = document.getElementById('temp-delete-all-btn');
+        const paginationEl = document.getElementById('temp-pagination');
+        const countEl = document.getElementById('temp-filter-count');
+        const filterFromEl = document.getElementById('temp-filter-from');
+        const filterToEl = document.getElementById('temp-filter-to');
+
+        this._destroyTempWavesurfers();
 
         if (!this.getActiveUsername()) {
             container.innerHTML = `<div class="auth-required-banner">
@@ -1886,44 +2173,370 @@ export const audioFlowMixin = {
                 <button class="auth-header-btn auth-header-btn--primary" onclick="document.getElementById('auth-open-login')?.click()">Ingresar</button>
             </div>`;
             if (deleteAllBtn) deleteAllBtn.style.display = 'none';
+            if (paginationEl) paginationEl.innerHTML = '';
+            if (countEl) countEl.textContent = '';
             return;
         }
 
+        // Sincroniza los inputs de fecha con el estado (por si el render viene de otro origen).
+        if (filterFromEl && filterFromEl.value !== (this._tempFilterFrom || '')) {
+            filterFromEl.value = this._tempFilterFrom || '';
+        }
+        if (filterToEl && filterToEl.value !== (this._tempFilterTo || '')) {
+            filterToEl.value = this._tempFilterTo || '';
+        }
+
+        const filtered = this._getFilteredTempRecordings();
+        const total = filtered.length;
+        const pageSize = this._tempPageSize || 8;
+        const totalPages = Math.max(1, Math.ceil(total / pageSize));
+        if (this._tempPage > totalPages) this._tempPage = totalPages;
+        if (this._tempPage < 1) this._tempPage = 1;
+        const start = (this._tempPage - 1) * pageSize;
+        const pageItems = filtered.slice(start, start + pageSize);
+
+        // "Borrar todas" sigue afectando a todas las grabaciones (no al filtro).
         if (deleteAllBtn) deleteAllBtn.style.display = this.tempRecordings.length > 0 ? '' : 'none';
 
-        if (this.tempRecordings.length === 0) {
-            container.innerHTML = '<p class="no-recordings">No hay grabaciones aún</p>';
+        // Contador visible con estado del filtro.
+        if (countEl) {
+            const hasFilter = this._tempFilterFrom || this._tempFilterTo;
+            if (this.tempRecordings.length === 0) {
+                countEl.textContent = '';
+            } else if (hasFilter) {
+                countEl.textContent = `${total} de ${this.tempRecordings.length} grabaciones`;
+            } else {
+                countEl.textContent = `${total} ${total === 1 ? 'grabación' : 'grabaciones'}`;
+            }
+        }
+
+        if (total === 0) {
+            const hasFilter = this._tempFilterFrom || this._tempFilterTo;
+            container.innerHTML = hasFilter
+                ? '<p class="no-recordings">No hay grabaciones en el rango seleccionado</p>'
+                : '<p class="no-recordings">No hay grabaciones aún</p>';
+            if (paginationEl) paginationEl.innerHTML = '';
             return;
         }
-        
-        container.innerHTML = this.tempRecordings.map(recording => `
+
+        container.innerHTML = pageItems.map(recording => {
+            const hasAudio = !!(recording.blob || recording.filePath);
+            const wavePlayer = hasAudio ? `
+                <div class="temp-wave-player">
+                    <div class="temp-wave" data-temp-wave-container data-id="${recording.id}"></div>
+                    <span class="temp-wave-time" data-temp-wave-time data-id="${recording.id}">0:00 / 0:00</span>
+                </div>` : '';
+            const createdLabel = this._formatCreatedAt(recording.createdAt);
+            return `
             <div class="recording-item${recording.uploading ? ' uploading' : ''}">
-                <div class="recording-info">
-                    <div class="recording-name">${escapeHtml(recording.name)}${recording.uploading ? ' <span class="upload-badge"><i class="fas fa-cloud-upload-alt"></i></span>' : ''}</div>
-                    <div class="recording-duration">${this.formatDuration(recording.duration)}</div>
+                <div class="recording-item-header">
+                    <div class="recording-info">
+                        <div class="recording-name">${escapeHtml(recording.name)}${recording.uploading ? ' <span class="upload-badge"><i class="fas fa-cloud-upload-alt"></i></span>' : ''}</div>
+                        <div class="recording-duration">${this.formatDuration(recording.duration)}</div>
+                        ${createdLabel ? `<div class="recording-created"><i class="fas fa-calendar-alt"></i> ${createdLabel}</div>` : ''}
+                    </div>
+                    <div class="recording-actions">
+                        <button class="btn-small" data-action="temp-play" data-id="${recording.id}" ${!hasAudio ? 'disabled' : ''} title="Reproducir">
+                            <i class="fas fa-play"></i>
+                        </button>
+                        <button class="btn-small" data-action="temp-stop" data-id="${recording.id}" title="Detener">
+                            <i class="fas fa-stop"></i>
+                        </button>
+                        <button class="btn-small" data-action="temp-expand" data-id="${recording.id}" ${!hasAudio ? 'disabled' : ''} title="Abrir en el reproductor grande">
+                            <i class="fas fa-expand"></i>
+                        </button>
+                        <button class="btn-small" data-action="temp-edit" data-id="${recording.id}" title="Cortar frases">
+                            <i class="fas fa-cut"></i>
+                        </button>
+                        <button class="btn-small btn-danger" data-action="temp-delete" data-id="${recording.id}" ${recording.uploading ? 'disabled' : ''} title="Eliminar">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
                 </div>
-                <div class="recording-actions">
-                    <button class="btn-small" data-action="temp-play" data-id="${recording.id}" ${!recording.blob && !recording.filePath ? 'disabled' : ''}>
-                        <i class="fas fa-play"></i>
-                    </button>
-                    <button class="btn-small" data-action="temp-stop" data-id="${recording.id}">
-                        <i class="fas fa-stop"></i>
-                    </button>
-                    <button class="btn-small" data-action="temp-edit" data-id="${recording.id}">
-                        <i class="fas fa-cut"></i>
-                    </button>
-                    <button class="btn-small btn-danger" data-action="temp-delete" data-id="${recording.id}" ${recording.uploading ? 'disabled' : ''}>
-                        <i class="fas fa-trash"></i>
-                    </button>
-                </div>
+                ${wavePlayer}
             </div>
-        `).join('');
+        `;
+        }).join('');
+
+        this._renderTempPagination(totalPages);
+        this._initTempWavesurfers();
+        this._refreshTempDatePickers();
+    },
+
+    _getFilteredTempRecordings() {
+        const from = this._tempFilterFrom ? new Date(this._tempFilterFrom + 'T00:00:00') : null;
+        // "Hasta" inclusive: sumamos 1 día y comparamos <.
+        const to = this._tempFilterTo ? new Date(this._tempFilterTo + 'T00:00:00') : null;
+        const toExclusive = to ? new Date(to.getTime() + 24 * 60 * 60 * 1000) : null;
+        if (!from && !toExclusive) return this.tempRecordings.slice();
+        return this.tempRecordings.filter(r => {
+            if (!r.createdAt) return false;
+            const t = new Date(r.createdAt).getTime();
+            if (Number.isNaN(t)) return false;
+            if (from && t < from.getTime()) return false;
+            if (toExclusive && t >= toExclusive.getTime()) return false;
+            return true;
+        });
+    },
+
+    _formatCreatedAt(iso) {
+        if (!iso) return '';
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return '';
+        const date = d.toLocaleDateString('es', { day: '2-digit', month: 'short', year: 'numeric' });
+        const time = d.toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' });
+        return `${date} · ${time}`;
+    },
+
+    _renderTempPagination(totalPages) {
+        const el = document.getElementById('temp-pagination');
+        if (!el) return;
+        if (totalPages <= 1) { el.innerHTML = ''; return; }
+
+        const current = this._tempPage;
+        // Ventana compacta con elipsis: primero, current-1, current, current+1, último.
+        const pages = new Set([1, totalPages, current - 1, current, current + 1]);
+        const sorted = [...pages].filter(p => p >= 1 && p <= totalPages).sort((a, b) => a - b);
+
+        let html = '';
+        html += `<button type="button" class="temp-page-btn" data-action="temp-page" data-page="${current - 1}" ${current === 1 ? 'disabled' : ''} aria-label="Página anterior">‹</button>`;
+        let prev = 0;
+        for (const p of sorted) {
+            if (p - prev > 1) html += `<span class="temp-page-ellipsis">…</span>`;
+            html += `<button type="button" class="temp-page-btn ${p === current ? 'active' : ''}" data-action="temp-page" data-page="${p}">${p}</button>`;
+            prev = p;
+        }
+        html += `<button type="button" class="temp-page-btn" data-action="temp-page" data-page="${current + 1}" ${current === totalPages ? 'disabled' : ''} aria-label="Página siguiente">›</button>`;
+        el.innerHTML = html;
+    },
+
+    setTempFilter({ from, to } = {}) {
+        this._tempFilterFrom = from || null;
+        this._tempFilterTo = to || null;
+        this._tempPage = 1;
+        this.updateTempRecordingsList();
+    },
+
+    clearTempFilter() {
+        if (this._tempFilterFromPicker) this._tempFilterFromPicker.clear();
+        if (this._tempFilterToPicker) this._tempFilterToPicker.clear();
+        const fromEl = document.getElementById('temp-filter-from');
+        const toEl = document.getElementById('temp-filter-to');
+        if (fromEl) fromEl.value = '';
+        if (toEl) toEl.value = '';
+        this.setTempFilter({ from: null, to: null });
+    },
+
+    _tempRecordingDatesSet() {
+        // Devuelve un Set de fechas "YYYY-MM-DD" (hora local) para las que hay al menos una grabación.
+        const s = new Set();
+        (this.tempRecordings || []).forEach(r => {
+            if (!r.createdAt) return;
+            const d = new Date(r.createdAt);
+            if (Number.isNaN(d.getTime())) return;
+            const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            s.add(key);
+        });
+        return s;
+    },
+
+    _refreshTempDatePickers() {
+        // Fuerza a Flatpickr a re-pintar los días para que los puntos de "día con grabación" se actualicen.
+        this._tempFilterFromPicker?.redraw();
+        this._tempFilterToPicker?.redraw();
+    },
+
+    initTempDatePickers() {
+        const fromEl = document.getElementById('temp-filter-from');
+        const toEl = document.getElementById('temp-filter-to');
+        if (!fromEl || !toEl) return;
+
+        // Si ya existían (re-init), destrúyelos.
+        this._tempFilterFromPicker?.destroy();
+        this._tempFilterToPicker?.destroy();
+
+        const commonOpts = {
+            locale: Spanish,
+            dateFormat: 'Y-m-d',
+            disableMobile: true, // Usa siempre el UI de Flatpickr, no el picker nativo del móvil.
+            onDayCreate: (_dObj, _dStr, _fp, dayElem) => {
+                const dates = this._tempRecordingDatesSet();
+                const dt = dayElem.dateObj;
+                if (!dt) return;
+                const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+                if (dates.has(key)) {
+                    dayElem.classList.add('has-recording');
+                    dayElem.setAttribute('title', 'Hay grabación este día');
+                }
+            },
+        };
+
+        this._tempFilterFromPicker = flatpickr(fromEl, {
+            ...commonOpts,
+            onChange: (selectedDates, dateStr) => {
+                this.setTempFilter({ from: dateStr || null, to: this._tempFilterTo });
+                if (this._tempFilterToPicker && selectedDates[0]) {
+                    this._tempFilterToPicker.set('minDate', selectedDates[0]);
+                }
+            },
+        });
+
+        this._tempFilterToPicker = flatpickr(toEl, {
+            ...commonOpts,
+            onChange: (selectedDates, dateStr) => {
+                this.setTempFilter({ from: this._tempFilterFrom, to: dateStr || null });
+                if (this._tempFilterFromPicker && selectedDates[0]) {
+                    this._tempFilterFromPicker.set('maxDate', selectedDates[0]);
+                }
+            },
+        });
+    },
+
+    setTempPage(page) {
+        const p = Number(page);
+        if (!Number.isFinite(p) || p < 1) return;
+        this._tempPage = p;
+        this.updateTempRecordingsList();
+    },
+
+    async expandTempRecording(id) {
+        const recording = this.tempRecordings.find(r => String(r.id) === String(id));
+        if (!recording) return;
+
+        // Si no hay blob local, descargar desde el server.
+        if (!(recording.blob instanceof Blob) && recording.filePath) {
+            try {
+                const url = getRecordingPublicUrl(recording.filePath);
+                if (!url) throw new Error('No URL');
+                this.showNotification('Cargando grabación…', 'info');
+                const resp = await fetch(url);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                recording.blob = await resp.blob();
+            } catch (e) {
+                console.error('expandTempRecording download error:', e);
+                this.showNotification('No se pudo cargar la grabación', 'error');
+                return;
+            }
+        }
+
+        if (!(recording.blob instanceof Blob)) {
+            this.showNotification('El audio no está disponible', 'info');
+            return;
+        }
+
+        this._showRecordReviewWave(recording.blob, recording.name);
+        // Scroll suave hasta el reproductor grande para que la nueva onda quede a la vista.
+        const review = document.getElementById('record-review');
+        review?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    },
+
+    _formatWaveTime(secs) {
+        const s = Math.max(0, Math.floor(Number(secs) || 0));
+        const m = Math.floor(s / 60);
+        const r = s % 60;
+        return `${m}:${String(r).padStart(2, '0')}`;
+    },
+
+    _initTempWavesurfers() {
+        // Instancia lazy: WaveSurfer solo por cada grabación cuando entra en viewport.
+        // Reusa el patrón de licks (app-controllers.js:1290) para no descargar N audios de golpe.
+        const container = document.getElementById('temp-recordings');
+        if (!container) return;
+
+        this._tempWavesurfers = new Map();
+        this._tempWaveObjectUrls = new Map();
+
+        this._tempWaveObserver = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (!entry.isIntersecting) return;
+                const waveEl = entry.target;
+                const id = waveEl.getAttribute('data-id');
+                if (this._tempWavesurfers.has(id)) {
+                    this._tempWaveObserver.unobserve(waveEl);
+                    return;
+                }
+                const rec = this.tempRecordings.find(r => String(r.id) === String(id));
+                if (!rec) return;
+
+                let url;
+                if (rec.blob instanceof Blob) {
+                    url = this.createTrackedObjectURL(rec.blob);
+                    this._tempWaveObjectUrls.set(id, url);
+                } else if (rec.filePath) {
+                    url = getRecordingPublicUrl(rec.filePath);
+                }
+                if (!url) return;
+
+                const ws = WaveSurfer.create({
+                    container: waveEl,
+                    url,
+                    waveColor: 'rgba(59, 168, 105, 0.55)',
+                    progressColor: '#3ba869',
+                    cursorColor: '#00ff41',
+                    cursorWidth: 1,
+                    height: 40,
+                    barWidth: 2,
+                    barGap: 1,
+                    barRadius: 2,
+                    normalize: true,
+                });
+
+                const playBtn = container.querySelector(`[data-action="temp-play"][data-id="${id}"] i`);
+                const timeEl = container.querySelector(`[data-temp-wave-time][data-id="${id}"]`);
+                const setTime = (cur) => {
+                    if (!timeEl) return;
+                    const total = ws.getDuration();
+                    timeEl.textContent = `${this._formatWaveTime(cur)} / ${this._formatWaveTime(total)}`;
+                };
+                ws.on('play',  () => playBtn && (playBtn.className = 'fas fa-pause'));
+                ws.on('pause', () => playBtn && (playBtn.className = 'fas fa-play'));
+                ws.on('finish', () => {
+                    if (playBtn) playBtn.className = 'fas fa-play';
+                    setTime(0);
+                });
+                ws.on('audioprocess', (t) => setTime(t));
+                ws.on('ready', () => setTime(0));
+
+                this._tempWavesurfers.set(id, ws);
+                this._tempWaveObserver.unobserve(waveEl);
+            });
+        }, { rootMargin: '150px' });
+
+        container.querySelectorAll('[data-temp-wave-container]').forEach(el => {
+            this._tempWaveObserver.observe(el);
+        });
+    },
+
+    _destroyTempWavesurfers() {
+        if (this._tempWaveObserver) {
+            this._tempWaveObserver.disconnect();
+            this._tempWaveObserver = null;
+        }
+        if (this._tempWavesurfers) {
+            this._tempWavesurfers.forEach(ws => { try { ws.destroy(); } catch { /* noop */ } });
+            this._tempWavesurfers.clear();
+            this._tempWavesurfers = null;
+        }
+        if (this._tempWaveObjectUrls) {
+            this._tempWaveObjectUrls.forEach(url => this.cleanupObjectURL(url));
+            this._tempWaveObjectUrls.clear();
+            this._tempWaveObjectUrls = null;
+        }
     },
 
     playTempRecording(id) {
+        const ws = this._tempWavesurfers?.get(String(id));
+        if (ws) {
+            // Pausa los demás para que solo suene uno a la vez.
+            this._tempWavesurfers.forEach((other, k) => {
+                if (k !== String(id) && other.isPlaying?.()) other.pause();
+            });
+            ws.playPause();
+            return;
+        }
+        // Fallback: si el WS aún no se instanció (fuera de viewport), reproducir con Audio.
         const recording = this.tempRecordings.find(r => r.id === id);
         if (!recording) return;
-
         let url;
         let isObjectUrl = false;
         if (recording.blob instanceof Blob) {
@@ -1933,7 +2546,6 @@ export const audioFlowMixin = {
             url = getRecordingPublicUrl(recording.filePath);
         }
         if (!url) return;
-
         const audio = new Audio(url);
         audio.play();
         audio.onended = () => {
@@ -1944,6 +2556,11 @@ export const audioFlowMixin = {
     },
 
     stopTempRecording(id) {
+        const ws = this._tempWavesurfers?.get(String(id));
+        if (ws) {
+            try { ws.stop(); } catch { /* noop */ }
+            return;
+        }
         const recording = this.tempRecordings.find(r => r.id === id);
         if (recording && recording.currentAudio) {
             recording.currentAudio.pause();
@@ -2653,19 +3270,71 @@ export const audioFlowMixin = {
 
     playPhrase(index) {
         const phrase = this.selectedPhrases[index];
-        const blobToPlay = phrase.audioBlob || phrase.sourceBlob || phrase.audioBlob;
+        if (!phrase) return;
+        const blobToPlay = phrase.audioBlob || phrase.sourceBlob;
         if (!blobToPlay) return;
+
+        // Detener cualquier frase anterior en reproducción para no encimar audios.
+        if (this._currentPhraseAudio) {
+            try { this._currentPhraseAudio.pause(); } catch { /* noop */ }
+            if (this._currentPhraseAudioUrl) this.cleanupObjectURL(this._currentPhraseAudioUrl);
+            this._currentPhraseAudio = null;
+            this._currentPhraseAudioUrl = null;
+        }
+
         const url = this.createTrackedObjectURL(blobToPlay);
         const audio = new Audio(url);
-        const shouldSeek = !phrase.audioBlob;
-        if (shouldSeek) audio.currentTime = Math.max(0, phrase.startTime || 0);
-        audio.play();
+        audio.preload = 'auto';
+        this._currentPhraseAudio = audio;
+        this._currentPhraseAudioUrl = url;
 
-        audio.onended = () => this.cleanupObjectURL(url);
-        
-        setTimeout(() => {
-            audio.pause();
+        // Si el audio es el blob completo (sourceBlob), hay que hacer seek al startTime
+        // y detener al llegar a endTime. Si ya es el WAV recortado (audioBlob), reproducir
+        // de corrido y limpiar al terminar.
+        const usesSourceBlob = !(phrase.audioBlob instanceof Blob);
+        const start = Math.max(0, Number(phrase.startTime) || 0);
+        const dur = Math.max(0.05, Number(phrase.duration) || 0);
+        const end = start + dur;
+
+        const cleanup = () => {
+            if (this._currentPhraseAudio === audio) {
+                this._currentPhraseAudio = null;
+                this._currentPhraseAudioUrl = null;
+            }
             this.cleanupObjectURL(url);
-        }, Math.max(0, (phrase.duration || 0) * 1000));
+        };
+
+        audio.addEventListener('ended', () => cleanup(), { once: true });
+        audio.addEventListener('error', () => cleanup(), { once: true });
+
+        if (!usesSourceBlob) {
+            // Blob ya recortado (por ensurePhraseHasExportedAudio o similar): reproducir de corrido.
+            audio.play().catch(() => cleanup());
+            return;
+        }
+
+        // Fuente completa: esperamos metadatos ANTES de hacer seek + play, si no el seek se ignora.
+        const startPlayback = () => {
+            try {
+                audio.currentTime = start;
+            } catch { /* algunos navegadores no permiten seek si duration es NaN todavía */ }
+            audio.play().catch(() => cleanup());
+        };
+
+        if (audio.readyState >= 1 /* HAVE_METADATA */) {
+            startPlayback();
+        } else {
+            audio.addEventListener('loadedmetadata', startPlayback, { once: true });
+        }
+
+        // Detener cuando el cursor pase el endTime real (no con setTimeout).
+        const onTime = () => {
+            if (audio.currentTime >= end) {
+                try { audio.pause(); } catch { /* noop */ }
+                audio.removeEventListener('timeupdate', onTime);
+                cleanup();
+            }
+        };
+        audio.addEventListener('timeupdate', onTime);
     },
 };

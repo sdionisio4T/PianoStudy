@@ -10,6 +10,11 @@ import {
     skeletonHTML, errorHTML, ERR_MSG
 } from '../modules/SupabaseDataManager.js';
 import WaveSurfer from 'wavesurfer.js';
+import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
+import TimelinePlugin from 'wavesurfer.js/dist/plugins/timeline.esm.js';
+import HoverPlugin from 'wavesurfer.js/dist/plugins/hover.esm.js';
+import flatpickr from 'flatpickr';
+import { Spanish } from 'flatpickr/dist/l10n/es.js';
 
 export const controllersMixin = {
     setupStudyDropzone() {
@@ -95,6 +100,7 @@ export const controllersMixin = {
     markSegmentStart() {
         try {
             const startTime = this.youtubeManager.markStart();
+            console.log('[CTL] markSegmentStart →', startTime);
             if (startTime !== null) {
                 const el = document.getElementById('segment-start-display');
                 if (el) el.textContent = this.youtubeManager.formatTime(startTime);
@@ -111,6 +117,7 @@ export const controllersMixin = {
     markSegmentEnd() {
         try {
             const endTime = this.youtubeManager.markEnd();
+            console.log('[CTL] markSegmentEnd →', endTime, 'start=', this.youtubeManager.segmentStart);
             if (endTime !== null) {
                 const el = document.getElementById('segment-end-display');
                 if (el) el.textContent = this.youtubeManager.formatTime(endTime);
@@ -119,7 +126,7 @@ export const controllersMixin = {
 
                 const playBtn = document.getElementById('play-segment-btn');
                 const saveBtn = document.getElementById('save-youtube-phrase-btn');
-                if (playBtn) playBtn.disabled = false;
+                if (playBtn) { playBtn.disabled = false; console.log('[CTL] play-segment-btn enabled'); }
                 if (saveBtn) saveBtn.disabled = false;
 
                 this.showNotification('Final marcado', 'success');
@@ -192,6 +199,9 @@ export const controllersMixin = {
                 return;
             }
 
+            // Limpiar el formulario (nombre/estilo/notas) pero MANTENER el segmento marcado
+            // para que el usuario pueda escucharlo de nuevo si quiere. Solo se resetea
+            // cuando pulse "Crear frase nueva".
             const nameEl = document.getElementById('phrase-name-input');
             const styleEl = document.getElementById('phrase-style-select');
             const notesEl = document.getElementById('phrase-notes-input');
@@ -199,12 +209,11 @@ export const controllersMixin = {
             if (styleEl) styleEl.value = '';
             if (notesEl) notesEl.value = '';
 
-            this.youtubeManager.clearSegment();
+            // Ocultar mark-controls + formulario y mostrar el banner con "Crear frase nueva".
+            document.getElementById('mark-controls')?.classList.add('hidden');
+            document.getElementById('save-phrase-section')?.classList.add('hidden');
             document.getElementById('segment-preview')?.classList.add('hidden');
-            const saveBtn = document.getElementById('save-youtube-phrase-btn');
-            const playBtn = document.getElementById('play-segment-btn');
-            if (saveBtn) saveBtn.disabled = true;
-            if (playBtn) playBtn.disabled = true;
+            document.getElementById('phrase-saved-banner')?.classList.remove('hidden');
 
             await this.loadYoutubePhrases(document.getElementById('youtube-phrases-filter')?.value || 'all');
             this.showNotification('¡Frase guardada!', 'success');
@@ -212,6 +221,30 @@ export const controllersMixin = {
             console.error('Error saving YouTube phrase:', error);
             this.showNotification('Error al guardar frase', 'error');
         }
+    },
+
+    startNewYoutubePhrase() {
+        // Reset explícito: limpia el segmento marcado y vuelve a mostrar los controles
+        // de "Marcar Inicio / Marcar Final / Reproducir" y el formulario para guardar.
+        this.youtubeManager?.clearSegment?.();
+
+        document.getElementById('phrase-saved-banner')?.classList.add('hidden');
+        document.getElementById('mark-controls')?.classList.remove('hidden');
+        document.getElementById('save-phrase-section')?.classList.remove('hidden');
+        document.getElementById('segment-preview')?.classList.add('hidden');
+
+        const saveBtn = document.getElementById('save-youtube-phrase-btn');
+        const playBtn = document.getElementById('play-segment-btn');
+        if (saveBtn) saveBtn.disabled = true;
+        if (playBtn) playBtn.disabled = true;
+
+        // Reset displays de start/end/duration.
+        const sEl = document.getElementById('segment-start-display');
+        const eEl = document.getElementById('segment-end-display');
+        const dEl = document.getElementById('segment-duration-display');
+        if (sEl) sEl.textContent = '0:00';
+        if (eEl) eEl.textContent = '0:00';
+        if (dEl) dEl.textContent = '0s';
     },
 
     async loadYoutubePhrases(styleFilter = 'all') {
@@ -293,20 +326,57 @@ export const controllersMixin = {
 
         try {
             const url = `https://youtube.com/watch?v=${phrase.videoId}`;
-            this.youtubeManager.loadVideo(url);
+            const isSameVideo = this.youtubeManager.currentVideoId === phrase.videoId;
+            if (!isSameVideo) this.youtubeManager.loadVideo(url);
             document.getElementById('youtube-player-container')?.classList.remove('hidden');
 
             this.youtubeManager.onTimeUpdate = (time) => {
                 this.updateTimeDisplay(time);
             };
 
-            setTimeout(() => {
-                if (this.youtubeManager.player) {
-                    this.youtubeManager.player.seekTo(phrase.startTime, true);
-                    this.youtubeManager.player.playVideo();
-                    document.getElementById('youtube-player')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            // Configurar el segmento en el manager: así el watcher central pausa
+            // automáticamente en endTime, sin depender de setTimeouts frágiles.
+            const endTime = Number(phrase.endTime) || (Number(phrase.startTime) + Number(phrase.duration || 0));
+            this.youtubeManager.segmentStart = Number(phrase.startTime) || 0;
+            this.youtubeManager.segmentEnd = endTime;
+            this.youtubeManager._segmentPaused = false;
+
+            // Reflejar el segmento cargado en el UI para que el user vea el rango y pueda re-reproducir.
+            const sEl = document.getElementById('segment-start-display');
+            const eEl = document.getElementById('segment-end-display');
+            const dEl = document.getElementById('segment-duration-display');
+            if (sEl) sEl.textContent = this.youtubeManager.formatTime(this.youtubeManager.segmentStart);
+            if (eEl) eEl.textContent = this.youtubeManager.formatTime(this.youtubeManager.segmentEnd);
+            if (dEl) dEl.textContent = `${Math.floor(this.youtubeManager.segmentEnd - this.youtubeManager.segmentStart)}s`;
+            document.getElementById('segment-preview')?.classList.remove('hidden');
+
+            // Mostrar los controles de marcado y habilitar Reproducir Segmento
+            // (por si el user quiere volver a escuchar la frase o marcar una nueva).
+            document.getElementById('mark-controls')?.classList.remove('hidden');
+            document.getElementById('save-phrase-section')?.classList.remove('hidden');
+            document.getElementById('phrase-saved-banner')?.classList.add('hidden');
+            const playBtn = document.getElementById('play-segment-btn');
+            if (playBtn) playBtn.disabled = false;
+
+            // Espera activa a que el player YT esté listo (loadVideoById es async y
+            // player.seekTo puede no existir aún los primeros 100-2000ms).
+            const tryPlay = (attempt = 0) => {
+                const p = this.youtubeManager.player;
+                const ready = p && typeof p.seekTo === 'function' && typeof p.playVideo === 'function';
+                if (!ready) {
+                    if (attempt < 40) return setTimeout(() => tryPlay(attempt + 1), 100);
+                    console.error('YT player never became ready');
+                    this.showNotification('El reproductor no está listo. Intenta de nuevo.', 'error');
+                    return;
                 }
-            }, 700);
+                try {
+                    this.youtubeManager.playSegment();
+                    document.getElementById('youtube-player')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                } catch (e) {
+                    console.error('playSegment error:', e);
+                }
+            };
+            tryPlay();
 
             this.showNotification('Reproduciendo frase...', 'success');
         } catch (error) {
@@ -1146,6 +1216,14 @@ export const controllersMixin = {
             return;
         }
 
+        // Rechazar nombres duplicados (comparación case-insensitive) para no confundir en la lista/cola.
+        const nameLower = name.toLowerCase();
+        const isDuplicate = (this.licks || []).some(l => String(l.name || '').trim().toLowerCase() === nameLower);
+        if (isDuplicate) {
+            this.showNotification(`Ya existe un lick con el nombre "${name}"`, 'error');
+            return;
+        }
+
         const submitBtn = document.querySelector('#lick-form button[type="submit"]');
         if (submitBtn) submitBtn.disabled = true;
 
@@ -1203,19 +1281,40 @@ export const controllersMixin = {
             createdAt: l.created_at || new Date().toISOString()
         }));
 
-        const filter = document.getElementById('style-filter');
-        const filterValue = filter ? filter.value : 'all';
-        
-        const filteredLicks = filterValue === 'all' 
-            ? this.licks 
-            : this.licks.filter(lick => lick.style === filterValue);
+        // Inicializar pickers de fecha si aún no lo están (idempotente).
+        this._initLicksDatePickers();
 
-        if (filteredLicks.length === 0) {
+        // Aplicar filtros (style + texto + fecha) y calcular paginación.
+        const allFiltered = this._getFilteredLicks();
+        const total = allFiltered.length;
+        const pageSize = this._licksPageSize || 9;
+        const totalPages = Math.max(1, Math.ceil(total / pageSize));
+        if (this._licksPage > totalPages) this._licksPage = totalPages;
+        if (this._licksPage < 1) this._licksPage = 1;
+        const start = (this._licksPage - 1) * pageSize;
+        const filteredLicks = allFiltered.slice(start, start + pageSize);
+
+        // Contador visible.
+        const countEl = document.getElementById('licks-filter-count');
+        if (countEl) {
+            const hasFilter = this._licksFilterText || this._licksFilterFrom || this._licksFilterTo
+                || (document.getElementById('style-filter')?.value && document.getElementById('style-filter').value !== 'all');
+            if (this.licks.length === 0) countEl.textContent = '';
+            else if (hasFilter) countEl.textContent = `${total} de ${this.licks.length} licks`;
+            else countEl.textContent = `${total} ${total === 1 ? 'lick' : 'licks'}`;
+        }
+
+        this._refreshLicksDatePickers();
+
+        if (total === 0) {
+            const hasFilter = this._licksFilterText || this._licksFilterFrom || this._licksFilterTo;
             licksList.innerHTML = `<div class="licks-controls">
                 <button class="btn-small" data-action="lick-select-all"><i class="fas fa-check-square"></i> Seleccionar todos</button>
                 <button class="btn-small" data-action="lick-deselect-all"><i class="fas fa-square"></i> Deseleccionar todos</button>
                 <button class="btn-small btn-danger" data-action="lick-delete-selected"><i class="fas fa-trash"></i> Eliminar seleccionados (0)</button>
-            </div><p class="empty-state-msg">Aún no tienes licks guardados. ¡Agrega el primero!</p>`;
+            </div><p class="empty-state-msg">${hasFilter ? 'No hay licks que coincidan con los filtros' : 'Aún no tienes licks guardados. ¡Agrega el primero!'}</p>`;
+            const pagEl = document.getElementById('licks-pagination');
+            if (pagEl) pagEl.innerHTML = '';
             return;
         }
         
@@ -1263,8 +1362,8 @@ export const controllersMixin = {
                     <p>${escapeHtml(lick.description)}</p>
                     ${playerBlock}
                     <div class="lick-actions">
-                        <button class="btn-small" data-action="study-add" data-id="${lick.id}" ${hasAudio ? '' : 'disabled'}>
-                            <i class="fas fa-plus"></i> Study
+                        <button class="btn-small" data-action="lick-expand" data-id="${lick.id}" ${hasAudio ? '' : 'disabled'} title="Abrir en el reproductor grande">
+                            <i class="fas fa-expand"></i> Abrir
                         </button>
                         <button class="btn-small" data-action="lick-download" data-id="${lick.id}">
                             <i class="fas fa-download"></i> Descargar
@@ -1340,6 +1439,140 @@ export const controllersMixin = {
                 if (ws) ws.playPause();
             });
         });
+
+        // Render paginación.
+        this._renderLicksPagination(totalPages);
+    },
+
+    _getFilteredLicks() {
+        const styleValue = document.getElementById('style-filter')?.value || 'all';
+        const q = String(this._licksFilterText || '').trim().toLowerCase();
+
+        const from = this._licksFilterFrom ? new Date(this._licksFilterFrom + 'T00:00:00') : null;
+        const to = this._licksFilterTo ? new Date(this._licksFilterTo + 'T00:00:00') : null;
+        const toExclusive = to ? new Date(to.getTime() + 24 * 60 * 60 * 1000) : null;
+
+        return (this.licks || []).filter(lick => {
+            if (styleValue !== 'all' && lick.style !== styleValue) return false;
+            if (q) {
+                const name = String(lick.name || '').toLowerCase();
+                if (!name.includes(q)) return false;
+            }
+            if (from || toExclusive) {
+                const t = new Date(lick.createdAt).getTime();
+                if (Number.isNaN(t)) return false;
+                if (from && t < from.getTime()) return false;
+                if (toExclusive && t >= toExclusive.getTime()) return false;
+            }
+            return true;
+        });
+    },
+
+    _licksDatesSet() {
+        const s = new Set();
+        (this.licks || []).forEach(l => {
+            if (!l.createdAt) return;
+            const d = new Date(l.createdAt);
+            if (Number.isNaN(d.getTime())) return;
+            const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            s.add(key);
+        });
+        return s;
+    },
+
+    _refreshLicksDatePickers() {
+        this._licksFilterFromPicker?.redraw();
+        this._licksFilterToPicker?.redraw();
+    },
+
+    _initLicksDatePickers() {
+        if (this._licksFilterFromPicker || this._licksFilterToPicker) return; // idempotente
+        const fromEl = document.getElementById('licks-filter-from');
+        const toEl = document.getElementById('licks-filter-to');
+        if (!fromEl || !toEl) return;
+
+        const commonOpts = {
+            locale: Spanish,
+            dateFormat: 'Y-m-d',
+            disableMobile: true,
+            onDayCreate: (_dObj, _dStr, _fp, dayElem) => {
+                const dates = this._licksDatesSet();
+                const dt = dayElem.dateObj;
+                if (!dt) return;
+                const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+                if (dates.has(key)) {
+                    dayElem.classList.add('has-recording');
+                    dayElem.setAttribute('title', 'Hay licks este día');
+                }
+            },
+        };
+
+        this._licksFilterFromPicker = flatpickr(fromEl, {
+            ...commonOpts,
+            onChange: (selectedDates, dateStr) => {
+                this.setLicksFilter({ from: dateStr || null });
+                if (this._licksFilterToPicker && selectedDates[0]) {
+                    this._licksFilterToPicker.set('minDate', selectedDates[0]);
+                }
+            },
+        });
+        this._licksFilterToPicker = flatpickr(toEl, {
+            ...commonOpts,
+            onChange: (selectedDates, dateStr) => {
+                this.setLicksFilter({ to: dateStr || null });
+                if (this._licksFilterFromPicker && selectedDates[0]) {
+                    this._licksFilterFromPicker.set('maxDate', selectedDates[0]);
+                }
+            },
+        });
+    },
+
+    setLicksFilter({ text, from, to } = {}) {
+        if (text !== undefined) this._licksFilterText = text || '';
+        if (from !== undefined) this._licksFilterFrom = from || null;
+        if (to !== undefined) this._licksFilterTo = to || null;
+        this._licksPage = 1;
+        this.loadLicks();
+    },
+
+    clearLicksFilters() {
+        this._licksFilterText = '';
+        this._licksFilterFrom = null;
+        this._licksFilterTo = null;
+        this._licksPage = 1;
+        const textEl = document.getElementById('licks-filter-text');
+        if (textEl) textEl.value = '';
+        this._licksFilterFromPicker?.clear();
+        this._licksFilterToPicker?.clear();
+        const styleFilter = document.getElementById('style-filter');
+        if (styleFilter) styleFilter.value = 'all';
+        this.loadLicks();
+    },
+
+    setLicksPage(page) {
+        const p = Number(page);
+        if (!Number.isFinite(p) || p < 1) return;
+        this._licksPage = p;
+        this.loadLicks();
+    },
+
+    _renderLicksPagination(totalPages) {
+        const el = document.getElementById('licks-pagination');
+        if (!el) return;
+        if (totalPages <= 1) { el.innerHTML = ''; return; }
+        const current = this._licksPage;
+        const pages = new Set([1, totalPages, current - 1, current, current + 1]);
+        const sorted = [...pages].filter(p => p >= 1 && p <= totalPages).sort((a, b) => a - b);
+        let html = '';
+        html += `<button type="button" class="temp-page-btn" data-action="licks-page" data-page="${current - 1}" ${current === 1 ? 'disabled' : ''} aria-label="Página anterior">‹</button>`;
+        let prev = 0;
+        for (const p of sorted) {
+            if (p - prev > 1) html += `<span class="temp-page-ellipsis">…</span>`;
+            html += `<button type="button" class="temp-page-btn ${p === current ? 'active' : ''}" data-action="licks-page" data-page="${p}">${p}</button>`;
+            prev = p;
+        }
+        html += `<button type="button" class="temp-page-btn" data-action="licks-page" data-page="${current + 1}" ${current === totalPages ? 'disabled' : ''} aria-label="Página siguiente">›</button>`;
+        el.innerHTML = html;
     },
 
     _formatWaveTime(secs) {
@@ -1368,6 +1601,258 @@ export const controllersMixin = {
         const lick = this.licks.find(l => l.id === lickId);
         if (lick) {
             this.showNotification(`Lick seleccionado: ${lick.name}`, 'info');
+        }
+    },
+
+    async expandLick(lickId) {
+        const lick = this.licks.find(l => String(l.id) === String(lickId));
+        if (!lick) return;
+
+        // Obtener blob local o descargar desde la URL pública.
+        let blob = lick.audioBlob instanceof Blob ? lick.audioBlob : null;
+        if (!blob && lick.audioUrl) {
+            try {
+                this.showNotification('Cargando lick…', 'info');
+                const resp = await fetch(lick.audioUrl);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                blob = await resp.blob();
+                lick.audioBlob = blob;
+            } catch (e) {
+                console.error('expandLick download error:', e);
+                this.showNotification('No se pudo cargar el audio del lick', 'error');
+                return;
+            }
+        }
+        if (!blob) {
+            this.showNotification('Este lick no tiene audio', 'info');
+            return;
+        }
+
+        this._showLickReviewWave(blob, lick.name || 'Lick');
+        document.getElementById('lick-review')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    },
+
+    _showLickReviewWave(audioBlob, label = 'Lick') {
+        const review = document.getElementById('lick-review');
+        const waveEl = document.getElementById('lick-review-wave');
+        const timelineEl = document.getElementById('lick-review-timeline');
+        const timeEl = document.getElementById('lick-review-time');
+        const playBtn = document.getElementById('lick-review-play');
+        const loopBtn = document.getElementById('lick-review-loop');
+        const speedSlider = document.getElementById('lick-review-speed');
+        const speedLabel = document.getElementById('lick-review-speed-label');
+        const clearRegionBtn = document.getElementById('lick-review-clear-region');
+        const speedResetBtn = document.getElementById('lick-review-speed-reset');
+        const labelEl = review?.querySelector('.visualizer-label');
+        if (!waveEl || !review || !audioBlob) return;
+        if (labelEl) labelEl.textContent = label;
+
+        this._destroyLickReviewWs();
+
+        // Pausar mini WS de los licks para que no sonen dos audios a la vez.
+        this._lickWavesurfers?.forEach(ws => { try { if (ws.isPlaying?.()) ws.pause(); } catch { /* noop */ } });
+
+        review.classList.remove('hidden');
+        review.classList.remove('has-placeholder');
+
+        const url = this.createTrackedObjectURL(audioBlob);
+        this._lickReviewObjectUrl = url;
+
+        requestAnimationFrame(() => {
+            waveEl.innerHTML = '';
+            if (timelineEl) timelineEl.innerHTML = '';
+
+            const regionsPlugin = RegionsPlugin.create();
+            const hoverPlugin = HoverPlugin.create({
+                lineColor: '#9d4edd',
+                lineWidth: 2,
+                labelBackground: 'rgba(157, 78, 221, 0.9)',
+                labelColor: '#fff',
+                labelSize: '11px',
+            });
+            const plugins = [regionsPlugin, hoverPlugin];
+            if (timelineEl) plugins.push(TimelinePlugin.create({ container: timelineEl, height: 14 }));
+
+            let ws;
+            try {
+                ws = WaveSurfer.create({
+                    container: waveEl,
+                    url,
+                    waveColor: 'rgba(157, 78, 221, 0.45)',
+                    progressColor: '#9d4edd',
+                    cursorColor: '#00ff41',
+                    cursorWidth: 1,
+                    height: 96,
+                    barWidth: 2,
+                    barGap: 1,
+                    barRadius: 2,
+                    normalize: true,
+                    plugins,
+                });
+            } catch (e) {
+                console.error('Lick review WaveSurfer create error:', e);
+                this.showNotification('No se pudo cargar el lick en el reproductor', 'error');
+                return;
+            }
+
+            const state = {
+                region: null,
+                loop: loopBtn?.getAttribute('aria-pressed') === 'true',
+                rate: Number(speedSlider?.value) || 1,
+            };
+
+            const setTime = (cur) => {
+                if (!timeEl) return;
+                const total = ws.getDuration();
+                timeEl.textContent = `${this._formatWaveTime(cur)} / ${this._formatWaveTime(total)}`;
+            };
+
+            ws.on('play',   () => playBtn && (playBtn.querySelector('i').className = 'fas fa-pause'));
+            ws.on('pause',  () => playBtn && (playBtn.querySelector('i').className = 'fas fa-play'));
+            ws.on('finish', () => { if (playBtn) playBtn.querySelector('i').className = 'fas fa-play'; setTime(0); });
+            ws.on('audioprocess', (t) => {
+                setTime(t);
+                // La región SIEMPRE limita cuando existe (así el user solo escucha lo seleccionado).
+                // Loop controla si al llegar al final se repite (región o toda la pista).
+                if (state.region && t >= state.region.end) {
+                    if (state.loop) ws.setTime(state.region.start);
+                    else { ws.pause(); ws.setTime(state.region.start); }
+                } else if (!state.region && state.loop) {
+                    const total = ws.getDuration();
+                    if (total && t >= total - 0.05) ws.setTime(0);
+                }
+            });
+            ws.on('ready', () => {
+                setTime(0);
+                try { ws.setPlaybackRate(state.rate, true); } catch { /* noop */ }
+            });
+            ws.on('error', (err) => {
+                console.error('Lick review WaveSurfer load error:', err);
+                this.showNotification('Error al decodificar el audio del lick', 'error');
+            });
+
+            regionsPlugin.enableDragSelection({ color: 'rgba(157, 78, 221, 0.20)' });
+            const setActiveRegion = (region) => {
+                if (state.region && state.region !== region) {
+                    try { state.region.remove(); } catch { /* noop */ }
+                }
+                state.region = region;
+                if (clearRegionBtn) clearRegionBtn.disabled = !region;
+            };
+            regionsPlugin.on('region-created', (region) => setActiveRegion(region));
+            regionsPlugin.on('region-updated', (region) => { state.region = region; });
+            regionsPlugin.on('region-clicked', (region, e) => {
+                e?.stopPropagation?.();
+                ws.setTime(region.start);
+                ws.play();
+            });
+
+            if (playBtn) {
+                playBtn.onclick = () => {
+                    try {
+                        if (ws.isPlaying()) { ws.pause(); return; }
+                        // Si hay región y el cursor está fuera, saltar al inicio de la región.
+                        if (state.region) {
+                            const now = ws.getCurrentTime();
+                            if (now < state.region.start || now >= state.region.end) {
+                                ws.setTime(state.region.start);
+                            }
+                        }
+                        ws.play();
+                    } catch { /* noop */ }
+                };
+            }
+            const restartBtn = document.getElementById('lick-review-restart');
+            if (restartBtn) {
+                restartBtn.onclick = () => {
+                    // Con región activa "Ir al inicio" salta al inicio de la región; sin ella, al 0.
+                    try { ws.setTime(state.region ? state.region.start : 0); } catch { /* noop */ }
+                };
+            }
+            if (loopBtn) {
+                loopBtn.onclick = () => {
+                    state.loop = !state.loop;
+                    loopBtn.setAttribute('aria-pressed', state.loop ? 'true' : 'false');
+                    loopBtn.classList.toggle('is-active', state.loop);
+                };
+            }
+            const applyRate = (r) => {
+                state.rate = r;
+                if (speedSlider) speedSlider.value = String(r);
+                if (speedLabel) speedLabel.textContent = `${r.toFixed(2)}x`;
+                try { ws.setPlaybackRate(r, true); } catch { /* noop */ }
+            };
+            if (speedSlider) {
+                speedSlider.oninput = () => applyRate(Number(speedSlider.value) || 1);
+                if (speedLabel) speedLabel.textContent = `${state.rate.toFixed(2)}x`;
+            }
+            if (speedResetBtn) speedResetBtn.onclick = () => applyRate(1);
+            if (clearRegionBtn) {
+                clearRegionBtn.onclick = () => {
+                    if (state.region) {
+                        try { state.region.remove(); } catch { /* noop */ }
+                        state.region = null;
+                    }
+                    clearRegionBtn.disabled = true;
+                };
+                clearRegionBtn.disabled = true;
+            }
+
+            this._lickReviewWs = ws;
+            this._lickReviewRegions = regionsPlugin;
+            this._lickReviewState = state;
+        });
+    },
+
+    _destroyLickReviewWs() {
+        if (this._lickReviewWs) {
+            try { this._lickReviewWs.destroy(); } catch { /* noop */ }
+            this._lickReviewWs = null;
+        }
+        if (this._lickReviewObjectUrl) {
+            this.cleanupObjectURL(this._lickReviewObjectUrl);
+            this._lickReviewObjectUrl = null;
+        }
+        this._lickReviewRegions = null;
+        this._lickReviewState = null;
+
+        const loopBtn = document.getElementById('lick-review-loop');
+        const speedSlider = document.getElementById('lick-review-speed');
+        const speedLabel = document.getElementById('lick-review-speed-label');
+        const clearRegionBtn = document.getElementById('lick-review-clear-region');
+        const speedResetBtn = document.getElementById('lick-review-speed-reset');
+        if (loopBtn) {
+            loopBtn.setAttribute('aria-pressed', 'false');
+            loopBtn.classList.remove('is-active');
+            loopBtn.onclick = null;
+        }
+        if (speedSlider) { speedSlider.value = '1'; speedSlider.oninput = null; }
+        if (speedLabel) speedLabel.textContent = '1.00x';
+        if (clearRegionBtn) { clearRegionBtn.disabled = true; clearRegionBtn.onclick = null; }
+        if (speedResetBtn) speedResetBtn.onclick = null;
+        const restartBtn = document.getElementById('lick-review-restart');
+        if (restartBtn) restartBtn.onclick = null;
+    },
+
+    _hideLickReview() {
+        this._destroyLickReviewWs();
+        const review = document.getElementById('lick-review');
+        const timeEl = document.getElementById('lick-review-time');
+        const playBtn = document.getElementById('lick-review-play');
+        // Vuelve al estado "vacío": deja el cuadro visible con placeholder, no lo esconde entero.
+        if (review) {
+            review.classList.remove('hidden');
+            review.classList.add('has-placeholder');
+        }
+        if (timeEl) timeEl.textContent = '0:00 / 0:00';
+        if (playBtn) { const i = playBtn.querySelector('i'); if (i) i.className = 'fas fa-play'; }
+        // Restaurar contenedor de wave con el placeholder para futuras cargas.
+        const waveEl = document.getElementById('lick-review-wave');
+        if (waveEl && !waveEl.querySelector('.lick-review-empty')) {
+            waveEl.innerHTML = `<div class="lick-review-empty">
+                <i class="fas fa-hand-pointer"></i>
+                <span>Haz click sobre el nombre de un lick, o en su botón <i class="fas fa-expand"></i> Abrir, para cargarlo aquí y navegar la onda.</span>
+            </div>`;
         }
     },
 

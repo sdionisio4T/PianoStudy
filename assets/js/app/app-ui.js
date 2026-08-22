@@ -21,9 +21,58 @@ export const uiMixin = {
         document.getElementById('cut-phrases-btn').addEventListener('click', () => this.openPhraseEditor());
         document.getElementById('temp-delete-all-btn')?.addEventListener('click', () => this.deleteAllTempRecordings());
 
+        // Filtro por fecha en Grabaciones Temporales — la instanciación de Flatpickr
+        // maneja onChange internamente, aquí solo queda el botón de limpiar.
+        document.getElementById('temp-filter-clear')?.addEventListener('click', () => this.clearTempFilter());
+        this.initTempDatePickers();
+
+        // Cerrar el reproductor grande y volver al monitor del micrófono.
+        document.getElementById('record-review-close')?.addEventListener('click', () => this._hideRecordReview());
+
+        // Doble click sobre cualquier grabación temporal → cargarla arriba en el cuadro grande.
+        document.getElementById('temp-recordings')?.addEventListener('dblclick', (e) => {
+            const item = e.target.closest?.('.recording-item');
+            if (!item) return;
+            const btn = item.querySelector('[data-action="temp-expand"]');
+            const id = btn?.dataset.id;
+            if (id) this.expandTempRecording(id);
+        });
+
+        // Doble click sobre una card de lick → cargarla en el reproductor grande de arriba.
+        document.getElementById('licks-list')?.addEventListener('dblclick', (e) => {
+            const card = e.target.closest?.('.lick-card');
+            if (!card) return;
+            const id = card.getAttribute('data-lick-id');
+            if (id) this.expandLick(id);
+        });
+        // Click sobre el título del lick → también carga en el reproductor grande (más descubrible).
+        document.getElementById('licks-list')?.addEventListener('click', (e) => {
+            const title = e.target.closest?.('.lick-header h4');
+            if (!title) return;
+            const card = title.closest('.lick-card');
+            const id = card?.getAttribute('data-lick-id');
+            if (id) this.expandLick(id);
+        });
+
+        // Cerrar el reproductor grande de licks.
+        document.getElementById('lick-review-close')?.addEventListener('click', () => this._hideLickReview());
+
+        // Filtros de Licks (texto + limpiar). Los pickers de fecha se instancian en loadLicks.
+        const licksTextInput = document.getElementById('licks-filter-text');
+        if (licksTextInput) {
+            let t;
+            licksTextInput.addEventListener('input', (e) => {
+                clearTimeout(t);
+                const value = e.target.value;
+                t = setTimeout(() => this.setLicksFilter({ text: value }), 200);
+            });
+        }
+        document.getElementById('licks-filter-clear')?.addEventListener('click', () => this.clearLicksFilters());
+
         // Device selection
         document.getElementById('refresh-devices').addEventListener('click', () => this.refreshAudioDevices());
         document.getElementById('audio-device').addEventListener('change', (e) => this.selectAudioDevice(e.target.value));
+        document.getElementById('mic-toggle-btn')?.addEventListener('click', () => this.toggleMic());
 
         // Backing track
         document.getElementById('backing-track-file').addEventListener('change', (e) => this.loadBackingTrack(e));
@@ -44,17 +93,30 @@ export const uiMixin = {
         document.getElementById('load-youtube-btn')?.addEventListener('click', () => {
             this.loadYoutubeVideo();
         });
-        document.getElementById('mark-start-btn')?.addEventListener('click', () => {
-            this.markSegmentStart();
-        });
-        document.getElementById('mark-end-btn')?.addEventListener('click', () => {
-            this.markSegmentEnd();
-        });
-        document.getElementById('play-segment-btn')?.addEventListener('click', () => {
-            this.playSegment();
+        // Delegación única para los 4 botones del editor de YouTube.
+        // Reemplaza los addEventListener directos porque el elemento puede recrearse
+        // en el DOM y perder los listeners; delegación al document sobrevive a eso.
+        document.addEventListener('click', (ev) => {
+            const t = ev.target?.closest?.('#play-segment-btn, #mark-start-btn, #mark-end-btn, #new-phrase-btn');
+            if (!t) return;
+            if (t.disabled) {
+                console.log('[UI] click ignorado, disabled:', t.id);
+                if (t.id === 'play-segment-btn') {
+                    this.showNotification('Marca inicio y final primero para poder reproducir el segmento', 'info');
+                }
+                return;
+            }
+            console.log('[UI] click', t.id);
+            if (t.id === 'mark-start-btn') this.markSegmentStart();
+            else if (t.id === 'mark-end-btn') this.markSegmentEnd();
+            else if (t.id === 'play-segment-btn') this.playSegment();
+            else if (t.id === 'new-phrase-btn') this.startNewYoutubePhrase();
         });
         document.getElementById('save-youtube-phrase-btn')?.addEventListener('click', () => {
             this.saveYoutubePhrase();
+        });
+        document.getElementById('new-phrase-btn')?.addEventListener('click', () => {
+            this.startNewYoutubePhrase();
         });
         document.getElementById('youtube-phrases-filter')?.addEventListener('change', (e) => {
             this.filterYoutubePhrases(e.target.value);
@@ -181,6 +243,14 @@ export const uiMixin = {
                 this.deleteTempRecording(actionBtn.dataset.id);
                 return;
             }
+            if (action === 'temp-expand') {
+                this.expandTempRecording(actionBtn.dataset.id);
+                return;
+            }
+            if (action === 'temp-page') {
+                this.setTempPage(actionBtn.dataset.page);
+                return;
+            }
 
             if (action === 'phrase-play') {
                 this.playPhrase(Number(actionBtn.dataset.index));
@@ -191,6 +261,14 @@ export const uiMixin = {
                 return;
             }
 
+            if (action === 'lick-expand') {
+                this.expandLick(actionBtn.dataset.id);
+                return;
+            }
+            if (action === 'licks-page') {
+                this.setLicksPage(actionBtn.dataset.page);
+                return;
+            }
             if (action === 'lick-play') {
                 this.playLick(actionBtn.dataset.id);
                 return;
