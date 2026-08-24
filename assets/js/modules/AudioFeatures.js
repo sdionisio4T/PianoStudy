@@ -261,6 +261,81 @@ export function sectionProfile(notes, duration, numSections = 3) {
     return out;
 }
 
+// Reparte las notas MIDI en los tres registros pianísticos convencionales.
+// Regla del piano (que la IA no puede inferir del pitch aislado):
+//
+//   - Grave (hasta Ab3, MIDI ≤ 56): territorio de la mano IZQUIERDA — bajos,
+//     walking bass, tumbao/montuno, comping, acordes de acompañamiento.
+//   - Zona mixta (A3–A4, MIDI 57–69, alrededor del do central=60): la
+//     izquierda puede subir con acordes extendidos y la derecha puede bajar
+//     con frases melódicas. NO atribuir rol rígido; mirar simultaneidad y
+//     patrón temporal.
+//   - Agudo (desde Bb4, MIDI ≥ 70): territorio de la mano DERECHA — melodía,
+//     improvisación, líneas de solo.
+//
+// Aplicable tanto a MIDI directo como a audio→MIDI (basic-pitch), porque el
+// input es siempre `midiNotes[]`.
+const BASS_MAX_MIDI  = 56;    // Ab3
+const MELODY_MIN_MIDI = 70;   // Bb4
+
+const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+
+export function handRoleZones(notes, duration = 0) {
+    if (!Array.isArray(notes) || notes.length === 0) return null;
+
+    const bass = [];
+    const transition = [];
+    const melody = [];
+    for (const n of notes) {
+        const p = notePitch(n);
+        if (!Number.isFinite(p) || p <= 0) continue;
+        if (p <= BASS_MAX_MIDI) bass.push(n);
+        else if (p < MELODY_MIN_MIDI) transition.push(n);
+        else melody.push(n);
+    }
+    const total = bass.length + transition.length + melody.length;
+    if (!total) return null;
+
+    // Simultaneidad ~ cuántas notas empiezan casi al mismo tiempo (dentro
+    // de 30 ms). Un valor alto en la zona grave sugiere acordes de comping;
+    // bajo con notas separadas en tiempo, walking o pedal-bass.
+    const clusterFactor = (subset) => {
+        if (subset.length < 2) return 0;
+        const sorted = [...subset].sort((a, b) => noteStart(a) - noteStart(b));
+        let clustered = 0;
+        for (let i = 1; i < sorted.length; i++) {
+            if (Math.abs(noteStart(sorted[i]) - noteStart(sorted[i - 1])) < 0.03) clustered++;
+        }
+        return Number((clustered / subset.length).toFixed(2));
+    };
+
+    const dur = Number(duration) > 0.5 ? Number(duration) : Math.max(0.5, Math.max(...notes.map(noteStart)));
+    return {
+        totalNotes: total,
+        bass: {
+            count: bass.length,
+            share: Number((bass.length / total).toFixed(2)),
+            avgPitch: Math.round(avg(bass.map(notePitch))),
+            perSecond: Number((bass.length / dur).toFixed(2)),
+            simultaneity: clusterFactor(bass),
+        },
+        transition: {
+            count: transition.length,
+            share: Number((transition.length / total).toFixed(2)),
+            avgPitch: Math.round(avg(transition.map(notePitch))),
+            perSecond: Number((transition.length / dur).toFixed(2)),
+            simultaneity: clusterFactor(transition),
+        },
+        melody: {
+            count: melody.length,
+            share: Number((melody.length / total).toFixed(2)),
+            avgPitch: Math.round(avg(melody.map(notePitch))),
+            perSecond: Number((melody.length / dur).toFixed(2)),
+            simultaneity: clusterFactor(melody),
+        },
+    };
+}
+
 // Punto de entrada único: toma la salida cruda de AudioAnalyzer y produce
 // todas las observaciones derivadas. Cualquier feature con datos insuficientes
 // aparece como null; el consumidor decide si mostrarlo o no.
@@ -278,5 +353,6 @@ export function deriveFeatures(analysis) {
         pitchClass: pitchClassProfile(notes),
         silence: silenceRatio(notes, duration),
         sections: sectionProfile(notes, duration, 3),
+        handRoles: handRoleZones(notes, duration),
     };
 }

@@ -16,6 +16,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { createRateLimiter } from '../_shared/rateLimiter.ts';
+import { getKeyAttemptOrder, TRANSIENT_UPSTREAM_STATUSES } from '../_shared/keyRotation.ts';
 
 const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -27,14 +28,29 @@ const corsHeaders: Record<string, string> = {
 // flash del momento — sobrevive a la rotación (los pines viejos como
 // 1.5-flash-latest y 2.5-flash se cierran para keys nuevas sin aviso).
 // Simetría texto/audio: mismo modelo para los dos modos, más simple de razonar
-// sobre costos. Se puede sobreescribir por request con `model:` en el body.
+// sobre costos. Se puede sobreescribir por request con `model:` en el body,
+// pero el modelo debe pasar por FREE_MODEL_GUARD abajo.
 const DEFAULT_TEXT_MODEL = 'gemini-flash-latest';
 const DEFAULT_AUDIO_MODEL = 'gemini-flash-latest';
 
+// Política: solo modelos free-tier de Google. Los modelos flash (flash,
+// flash-latest, 1.5-flash, 2.0-flash, 2.5-flash, flash-lite, etc.) tienen
+// generosa cuota gratuita en AI Studio. Los "-pro" (gemini-1.5-pro,
+// gemini-2.5-pro) son de pago fuera de la cuota chica de trial y NO deben
+// llamarse desde esta app. Match sobre la substring "flash" en el slug
+// (case-insensitive) — cubre alias vivos y pines históricos sin whitelistear
+// cada uno. Rechazamos con 400 antes de tocar Google.
+const FREE_MODEL_GUARD = true;
+const isFreeGeminiModel = (m: string) => /flash/i.test(m);
+
 // URL Gemini por modelo — se resuelve dinámicamente para permitir que el
-// cliente pida un modelo específico (default distinto por modo).
-const geminiUrl = (model: string) =>
-  `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+// cliente pida un modelo específico (default distinto por modo). Cuando el
+// cliente pide streaming, cambia el endpoint a :streamGenerateContent con
+// alt=sse para obtener SSE compatible con nuestro parser.
+const geminiUrl = (model: string, stream: boolean) =>
+  stream
+    ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`
+    : `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 
 // Rate limiters separados: audio pesa mucho más por request (payload +
 // tokens), lo limitamos a la mitad de lo que se permite en texto. Ambos en
@@ -117,9 +133,11 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  const apiKey = Deno.env.get('GEMINI_API_KEY');
-  if (!apiKey) {
-    return new Response(JSON.stringify({ error: 'Server misconfigured: missing GEMINI_API_KEY' }), {
+  const rawKeySlot = (payloadIn as { keySlot?: unknown }).keySlot;
+  const preferredSlot = rawKeySlot === 1 || rawKeySlot === 2 ? rawKeySlot : undefined;
+  const attemptOrder = getKeyAttemptOrder(Deno.env, { prefix: 'GEMINI', preferredSlot });
+  if (attemptOrder.length === 0) {
+    return new Response(JSON.stringify({ error: 'Server misconfigured: missing GEMINI_API_KEY[_2]' }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
@@ -130,10 +148,22 @@ Deno.serve(async (req: Request) => {
       ? payloadIn.model
       : (mode === 'audio' ? DEFAULT_AUDIO_MODEL : DEFAULT_TEXT_MODEL);
 
+    if (FREE_MODEL_GUARD && !isFreeGeminiModel(model)) {
+      return new Response(JSON.stringify({
+        error: `Gemini proxy solo permite modelos free ("flash*"). Recibido: "${model}".`,
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     const temperature = Number.isFinite(payloadIn.temperature as number)
       ? Math.min(1, Math.max(0, Number(payloadIn.temperature)))
       : undefined;
     const wantsJson = payloadIn.responseFormat === 'json_object';
+    // Streaming solo soportado en modo texto — el modo audio ya usa un endpoint
+    // distinto (generateContent + inline_data) y no vale la pena complicarlo.
+    const wantsStream = mode === 'text' && (payloadIn as { stream?: unknown }).stream === true;
     const systemPrompt = typeof payloadIn.systemPrompt === 'string' ? payloadIn.systemPrompt : '';
 
     let contents: unknown;
@@ -218,22 +248,51 @@ Deno.serve(async (req: Request) => {
     if (typeof maxOutputTokens === 'number') generationConfig.maxOutputTokens = maxOutputTokens;
     if (Object.keys(generationConfig).length > 0) payload.generationConfig = generationConfig;
 
-    const res = await fetch(`${geminiUrl(model)}?key=${apiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+    let lastRes: Response | null = null;
+    let usedSlot: 1 | 2 = attemptOrder[0].slot;
+    const baseUrl = geminiUrl(model, wantsStream);
 
-    const raw = await res.text();
-    let body: unknown = raw;
-    try {
-      body = JSON.parse(raw);
-    } catch {
-      // leave as string
+    for (let i = 0; i < attemptOrder.length; i++) {
+      const { key, slot } = attemptOrder[i];
+      // Gemini pasa la API key por query string (`?key=...`). Añadimos `&`
+      // vs `?` según si la URL ya lleva query (streaming lleva alt=sse).
+      const sep = baseUrl.includes('?') ? '&' : '?';
+      const res = await fetch(`${baseUrl}${sep}key=${key}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      lastRes = res;
+      usedSlot = slot;
+
+      if (wantsStream) break;
+      if (res.ok) break;
+      if (!TRANSIENT_UPSTREAM_STATUSES.has(res.status)) break;
+      if (i === attemptOrder.length - 1) break;
     }
 
-    // Always return 200 so supabase-js invoke doesn't throw transport errors.
-    return new Response(JSON.stringify({ status: res.status, body }), {
+    if (wantsStream && lastRes && lastRes.ok && lastRes.body) {
+      return new Response(lastRes.body, {
+        status: 200,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+          'X-Key-Slot': String(usedSlot),
+        },
+      });
+    }
+
+    const raw = await (lastRes?.text() ?? Promise.resolve(''));
+    let body: unknown = raw;
+    try { body = JSON.parse(raw); } catch { /* leave as string */ }
+
+    return new Response(JSON.stringify({
+      status: lastRes?.status ?? 500,
+      body,
+      meta: { keySlotUsed: usedSlot },
+    }), {
       status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });

@@ -1,4 +1,5 @@
 import { db } from './supabase-client.js';
+import { streamChat } from './streamingClient.js';
 
 // NeuralJam Chatbot — mascota cyan pulsante en la esquina + panel de chat.
 // Usa la edge function 'groq-proxy' ya existente (misma que AIAnalysisEngine).
@@ -268,6 +269,17 @@ const CSS = `
   border-color: rgba(79,209,255,0.08);
   cursor: not-allowed;
 }
+.njc-cooldown {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  width: 0%;
+  background: linear-gradient(90deg, rgba(79,209,255,0.35), rgba(79,209,255,0.85));
+  box-shadow: 0 0 6px rgba(79,209,255,0.5);
+  pointer-events: none;
+  transition: width linear;
+}
 `;
 
 const SYSTEM_PROMPT = `Sos NeuralJam, el asistente conversacional de PianoStudy.
@@ -308,7 +320,37 @@ Vos mismo (NeuralJam) corrés a través de la edge function \`groq-proxy\` — l
 # Límites
 Si preguntan algo fuera de música/piano/la app (política, medicina, código no relacionado, etc.), respondé breve, honesto, y volvé al eje sin dramatizar el corte. No inventes funciones que la app no tiene: si no estás seguro de si algo existe, decilo. No prometas cambios de código ni "lo voy a arreglar" — vos sos un asistente conversacional, no modificás la app.`;
 
-const HISTORY_LIMIT = 8; // últimos N turnos de contexto
+const HISTORY_LIMIT = 5; // últimos N turnos de contexto (bajado de 8 → 5 para no
+                          // acercarse al TPM del free tier de Groq).
+const COOLDOWN_MS = 6000; // pausa mínima entre mensajes: el proxy Groq permite
+                           // 10 req/min por usuario, así que 6s entre envíos deja
+                           // margen suficiente para no pegar rate limit encadenado.
+const CHAT_MAX_ATTEMPTS = 3;                          // 1 original + 2 reintentos
+// 413 comparte curva con 429: son la misma familia (TPM/RPM excedido) y Groq
+// devuelve el mismo "try again in Ns" en el body para ambos. Backoff largo
+// porque la ventana TPM se rellena por MINUTO, no por segundos.
+const CHAT_BACKOFF_MS = { 413: [0, 5000, 12000], 429: [0, 5000, 12000], default: [0, 1000, 3000] };
+const CHAT_RETRY_AFTER_HARD_LIMIT_MS = 15000;
+// Cap por mensaje al reconstruir el historial. Groq free tier tiene 8K TPM;
+// con SYSTEM_PROMPT (~1800 t) + 10 mensajes × cap + max_tokens 500 + margen
+// tenemos que caber. 300 chars ≈ 100 tokens reales, 10 mensajes = 1000 t,
+// total ~3300 t → deja 4700 t de holgura para preguntas largas.
+const CHAT_HISTORY_CHAR_CAP = 300;
+// Cap del texto del usuario en una sola pregunta. Preguntas más largas se
+// cortan silenciosamente en la construcción del prompt (el mensaje visible
+// para el usuario no cambia — es solo lo que va al modelo).
+const CHAT_USER_TEXT_CAP = 1200;
+
+function _extractChatRetryAfterMs(body) {
+  try {
+    const raw = typeof body === 'string' ? body : JSON.stringify(body || '');
+    const m = raw.match(/try again in\s+([\d.]+)\s*(ms|s)/i);
+    if (!m) return null;
+    const n = parseFloat(m[1]);
+    if (!Number.isFinite(n) || n < 0) return null;
+    return m[2].toLowerCase() === 'ms' ? Math.round(n) : Math.round(n * 1000);
+  } catch { return null; }
+}
 
 class NeuralJamChatbot {
   constructor() {
@@ -396,20 +438,120 @@ class NeuralJamChatbot {
     const typing = this._appendTyping();
 
     try {
-      const reply = await this._callGroq(text);
-      typing.remove();
-      this._appendBot(reply);
+      const reply = await this._callGroqStreamingWithFallback(text, (partial) => {
+        // Al primer chunk: reemplazamos los puntitos por la burbuja del bot
+        // que se va llenando. Los chunks siguientes actualizan el textContent.
+        if (typing.parentNode) typing.remove();
+        if (!this._streamingBubble) this._streamingBubble = this._appendBot('');
+        this._streamingBubble.textContent = partial;
+        this._scrollBottom();
+      });
+      if (typing.parentNode) typing.remove();
+      if (this._streamingBubble) {
+        this._streamingBubble.textContent = reply;
+        this._streamingBubble = null;
+      } else {
+        this._appendBot(reply);
+      }
       this.history.push({ role: 'assistant', content: reply });
       this._trimHistory();
       this._pulseResponding();
     } catch (err) {
       typing.remove();
-      this._appendBot(`Error: ${err?.message || 'no pude responder'}`, true);
+      // Mensaje amable en 429 en vez del "Error: 429 — ...". La barra de
+      // cooldown que arranca abajo cubre visualmente los ~6s de espera.
+      const msg = String(err?.message || '');
+      const friendly = /(^|\s)429\b|rate.?limit|too many|saturad|try again/i.test(msg)
+        ? 'Estoy saturado ahora mismo. Esperá unos segundos y volvé a preguntar.'
+        : `No pude responder: ${msg || 'error desconocido'}`;
+      // Si veníamos llenando una burbuja por streaming, la sacamos antes de
+      // mostrar el error para no dejar texto parcial huérfano.
+      if (this._streamingBubble?.parentNode) this._streamingBubble.remove();
+      this._streamingBubble = null;
+      this._appendBot(friendly, true);
       this._flashError();
     } finally {
+      // Cooldown UI de COOLDOWN_MS: input y botón siguen deshabilitados
+      // mientras la barra crece de 0 → 100%. Al terminar se rehabilita todo.
+      this._startCooldown(COOLDOWN_MS);
+    }
+  }
+
+  _startCooldown(ms) {
+    if (this._cooldownTimeout) {
+      clearTimeout(this._cooldownTimeout);
+      this._cooldownTimeout = null;
+    }
+    if (this._cooldownBar) {
+      this._cooldownBar.remove();
+      this._cooldownBar = null;
+    }
+    const form = this.root?.querySelector('.njc-form');
+    if (!form) {
       this._setBusy(false);
       this.input?.focus();
+      return;
     }
+    const bar = document.createElement('div');
+    bar.className = 'njc-cooldown';
+    bar.style.transitionDuration = `${ms}ms`;
+    form.appendChild(bar);
+    this._cooldownBar = bar;
+    requestAnimationFrame(() => { bar.style.width = '100%'; });
+    this._cooldownTimeout = setTimeout(() => {
+      bar.remove();
+      this._cooldownBar = null;
+      this._cooldownTimeout = null;
+      this._setBusy(false);
+      this.input?.focus();
+    }, ms);
+  }
+
+  // Envuelve la lógica de streaming con fallback al método no-stream.
+  // Streaming va ON por default; se puede apagar con
+  //   localStorage['pianoStudy.chat.streaming'] = 'off'.
+  async _callGroqStreamingWithFallback(userText, onPartial) {
+    let streamingOff = false;
+    try { streamingOff = localStorage.getItem('pianoStudy.chat.streaming') === 'off'; }
+    catch { /* localStorage bloqueado */ }
+
+    if (!streamingOff) {
+      try {
+        const contextLines = this.history
+          .slice(-HISTORY_LIMIT * 2, -1)
+          .map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${String(m.content || '').slice(0, CHAT_HISTORY_CHAR_CAP)}`)
+          .join('\n');
+        const userTextCapped = String(userText || '').slice(0, CHAT_USER_TEXT_CAP);
+        const prompt = contextLines
+          ? `${contextLines}\nUsuario: ${userTextCapped}\nAsistente:`
+          : userTextCapped;
+
+        let out = '';
+        await streamChat({
+          provider: 'groq',
+          body: {
+            prompt,
+            systemPrompt: SYSTEM_PROMPT,
+            temperature: 0.7,
+            maxTokens: 500,
+          },
+          onChunk: (_delta, full) => {
+            out = full;
+            if (typeof onPartial === 'function') onPartial(full);
+          },
+          onDone: (full) => { out = full || out; },
+        });
+        if (out) return out;
+        // Stream vacío → caemos al no-stream abajo.
+      } catch (err) {
+        console.warn('NeuralJam streaming falló, uso no-stream:', err?.message || err);
+        // Fallback: la burbuja parcial se resetea a "" antes del reintento
+        // no-stream para no dejar texto pegado.
+        if (typeof onPartial === 'function') onPartial('');
+      }
+    }
+    // No-stream: idéntico al comportamiento previo, con retry por status transitorios.
+    return await this._callGroq(userText);
   }
 
   async _callGroq(userText) {
@@ -417,33 +559,81 @@ class NeuralJamChatbot {
     // El proxy espera un solo `prompt` string + `systemPrompt`.
     const contextLines = this.history
       .slice(-HISTORY_LIMIT * 2, -1) // sin incluir el turno actual (ya está al final)
-      .map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`)
+      .map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${String(m.content || '').slice(0, CHAT_HISTORY_CHAR_CAP)}`)
       .join('\n');
 
+    const userTextCapped = String(userText || '').slice(0, CHAT_USER_TEXT_CAP);
     const prompt = contextLines
-      ? `${contextLines}\nUsuario: ${userText}\nAsistente:`
-      : userText;
+      ? `${contextLines}\nUsuario: ${userTextCapped}\nAsistente:`
+      : userTextCapped;
 
-    const { data, error } = await db.functions.invoke('groq-proxy', {
-      body: {
-        prompt,
-        systemPrompt: SYSTEM_PROMPT,
-        temperature: 0.7,
-        maxTokens: 500,
-      },
-    });
+    const body = {
+      prompt,
+      systemPrompt: SYSTEM_PROMPT,
+      temperature: 0.7,
+      maxTokens: 500,
+    };
 
-    if (error) throw new Error(error.message || 'transporte');
-    const status = data?.status;
-    if (typeof status !== 'number' || status >= 400) {
-      const bodyMsg = typeof data?.body === 'object'
-        ? (data.body?.error?.message || data.body?.error || JSON.stringify(data.body))
-        : String(data?.body || '');
-      throw new Error(`${status || 'sin status'} — ${String(bodyMsg).slice(0, 140)}`);
+    // Retry con backoff — mismo patrón que AIAnalysisEngine._callProviderWithRetry.
+    // Antes cualquier 429 o error transitorio del proxy tiraba el mensaje directo
+    // como error del chat; ahora reintenta 2 veces respetando "try again in Ns"
+    // del body de Groq.
+    let lastErr = null;
+    let lastStatus = null;
+    const waitFor = (attempt) => {
+      if (attempt === 0) return 0;
+      const table = CHAT_BACKOFF_MS[lastStatus] || CHAT_BACKOFF_MS.default;
+      return table[attempt] ?? table[table.length - 1];
+    };
+
+    for (let attempt = 0; attempt < CHAT_MAX_ATTEMPTS; attempt++) {
+      const wait = waitFor(attempt);
+      if (wait > 0) await new Promise(r => setTimeout(r, wait));
+      try {
+        const { data, error } = await db.functions.invoke('groq-proxy', { body });
+        if (error) {
+          lastErr = new Error(error.message || 'transporte');
+          lastStatus = null;
+          if (attempt < CHAT_MAX_ATTEMPTS - 1) continue;
+          throw lastErr;
+        }
+        const status = data?.status;
+        if (typeof status !== 'number' || status >= 400) {
+          const bodyMsg = typeof data?.body === 'object'
+            ? (data.body?.error?.message || data.body?.error || JSON.stringify(data.body))
+            : String(data?.body || '');
+          lastErr = new Error(`${status || 'sin status'} — ${String(bodyMsg).slice(0, 140)}`);
+          lastStatus = typeof status === 'number' ? status : null;
+          if (status === 429 || status === 413) {
+            const retryAfterMs = _extractChatRetryAfterMs(data?.body);
+            if (retryAfterMs !== null && retryAfterMs > CHAT_RETRY_AFTER_HARD_LIMIT_MS) {
+              throw lastErr;
+            }
+            if (retryAfterMs !== null && attempt < CHAT_MAX_ATTEMPTS - 1) {
+              const w = Math.min(retryAfterMs + 500, CHAT_RETRY_AFTER_HARD_LIMIT_MS);
+              await new Promise(r => setTimeout(r, w));
+              continue;
+            }
+          }
+          // 413 = TPM excedido (Groq lo devuelve así cuando input+max_tokens
+          // pasa el límite por minuto). Comparte semántica con 429: rate-limit
+          // temporal que puede pasar si retriamos. Los truncados de history y
+          // user text arriba deberían prevenirlo, pero por si acaso lo tratamos
+          // como transient para que el retry con backoff largo tenga chance.
+          const TRANSIENT = new Set([413, 429, 500, 502, 503, 504]);
+          if (TRANSIENT.has(status) && attempt < CHAT_MAX_ATTEMPTS - 1) continue;
+          throw lastErr;
+        }
+        const text = data?.body?.choices?.[0]?.message?.content;
+        if (!text) throw new Error('respuesta vacía');
+        return String(text).trim();
+      } catch (e) {
+        lastErr = e;
+        if (attempt < CHAT_MAX_ATTEMPTS - 1) continue;
+        throw lastErr;
+      }
     }
-    const text = data?.body?.choices?.[0]?.message?.content;
-    if (!text) throw new Error('respuesta vacía');
-    return String(text).trim();
+    throw lastErr || new Error('sin respuesta');
   }
 
   _trimHistory() {
@@ -467,6 +657,9 @@ class NeuralJamChatbot {
     el.textContent = text;
     this.messagesEl.appendChild(el);
     this._scrollBottom();
+    // Devolver el elemento habilita al caller (send() durante streaming) a
+    // ir actualizándole el textContent chunk por chunk sin re-crearlo.
+    return el;
   }
 
   _appendTyping() {

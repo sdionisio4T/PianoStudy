@@ -1,5 +1,5 @@
 import { db } from './supabase-client.js';
-import { deriveFeatures } from './AudioFeatures.js';
+import { deriveFeatures, handRoleZones } from './AudioFeatures.js';
 import { parseLlmJson } from '../utils/jsonRepair.js';
 import { getRelevantMusicalTerms } from '../data/musicalTerms.js';
 
@@ -28,30 +28,38 @@ export class AIAnalysisEngine {
     // bajando memoria/auditory/vocabulario dinámicamente.
     static PROMPT_TOKEN_SAFE_CEILING = 10500;
 
-    // Estimador rápido de tokens: ~4 chars/token en español (conservador —
-    // el ratio real es cercano a 3.5, así que sobreestimamos un poco, lo
-    // que hace el guard más cauto). Suficiente para evitar 413.
+    // Estimador rápido de tokens: 3 chars/token en español. Empíricamente
+    // los tokenizers de Groq (gpt-oss, llama) y Gemini rinden 3-3.5 chars/token
+    // en español rioplatense con acentos y contracciones ("estás", "cómo",
+    // "análisis"). El comentario anterior decía "conservador con /4" — no lo
+    // era: /4 SUBESTIMA en ~20-25%, así que un guard de 3500 estimados
+    // resultaba en 4500-4700 reales, y con Groq free tier bajado a 8K TPM
+    // (2026-08) el 413 volvió. Con /3 el guard es realmente conservador y
+    // sobreestima ligeramente, que es lo que queremos.
     static _estimateTokens(text) {
         if (!text) return 0;
-        return Math.ceil(String(text).length / 4);
+        return Math.ceil(String(text).length / 3);
     }
 
     // Status transitorios donde vale la pena reintentar antes de caer al fallback.
-    // 429 = rate limit (Groq free tier o proxy), 503 = high demand (Gemini),
-    // 500/502/504 = errores de gateway/upstream. Un 400/401/403 NO se reintenta:
-    // son problemas del request o de la key.
-    static TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
+    // 429 = rate limit (Groq free tier o proxy), 413 = TPM excedido en Groq
+    // compound (llama-4-scout devuelve 413 con "try again in Ns" cuando el
+    // Used+Requested pasa el límite TPM aunque el request en sí no sea grande),
+    // 503 = high demand (Gemini), 500/502/504 = errores de gateway/upstream.
+    // Un 400/401/403 NO se reintenta: son problemas del request o de la key.
+    static TRANSIENT_STATUSES = new Set([413, 429, 500, 502, 503, 504]);
 
     // Backoff diferenciado por status del intento anterior.
-    // - 429: la ventana de rate limit se rellena por MINUTO (tanto en el proxy
-    //   —10 req/min por usuario— como en el free tier de Groq —TPM/RPM—). Se
-    //   respeta primero el "try again in Ns" que viene en el body del error;
-    //   si no viene o es muy largo (>15s) directamente NO reintentamos y
-    //   dejamos que el caller vaya al fallback local. La tabla queda como red
-    //   de seguridad para 429 sin retry-after (rate del proxy propio).
+    // - 429 / 413: la ventana de rate limit se rellena por MINUTO (tanto en el
+    //   proxy —10 req/min por usuario— como en el free tier de Groq —TPM/RPM—).
+    //   Se respeta primero el "try again in Ns" que viene en el body del error
+    //   (mismo formato para ambos statuses); si no viene o es muy largo (>15s)
+    //   directamente NO reintentamos y dejamos que el caller vaya al fallback
+    //   cruzado. La tabla queda como red de seguridad sin retry-after.
     // - 5xx: picos transitorios del upstream, típicamente se resuelven en 1-3s.
     // Índice = número de intento (0 = original, sin espera).
     static BACKOFFS_MS_BY_STATUS = {
+        413: [0, 5000, 12000],
         429: [0, 5000, 12000],
         default: [0, 1000, 3000],
     };
@@ -102,6 +110,12 @@ export class AIAnalysisEngine {
             body.maxOutputTokens = n;
             body.maxTokens = n;
         }
+        // keySlot: si el caller lo pasa, va al proxy que lo respeta. Sirve
+        // para debug/A-B manual — sin él, los proxies alternan las dos keys
+        // automáticamente (roundrobin) y hacen fallback a la otra si falla.
+        if (options.keySlot === 1 || options.keySlot === 2) {
+            body.keySlot = options.keySlot;
+        }
 
         const maxAttempts = 3;                  // 1 original + 2 reintentos
         let lastErr = null;
@@ -139,11 +153,12 @@ export class AIAnalysisEngine {
                 if (typeof status !== 'number' || status >= 400) {
                     lastErr = new Error(`${providerName} error: ${status ?? 'unknown'}`);
                     lastStatus = typeof status === 'number' ? status : null;
-                    // Para 429, respetar el retry-after que viene en el body.
-                    // Si Groq pide esperar más que RETRY_AFTER_HARD_LIMIT_MS,
-                    // abandonamos: reintentar cuando la ventana aún no se liberó
-                    // solo bloquea al usuario para probablemente fallar igual.
-                    if (status === 429) {
+                    // Para 429 y 413 (TPM excedido en Groq), respetar el
+                    // retry-after que viene en el body. Si Groq pide esperar
+                    // más que RETRY_AFTER_HARD_LIMIT_MS, abandonamos: reintentar
+                    // cuando la ventana aún no se liberó solo bloquea al usuario
+                    // para probablemente fallar igual.
+                    if (status === 429 || status === 413) {
                         const retryAfterMs = AIAnalysisEngine._extractRetryAfterMs(data?.body);
                         if (retryAfterMs !== null && retryAfterMs > AIAnalysisEngine.RETRY_AFTER_HARD_LIMIT_MS) {
                             console.warn(`${providerName} pidió esperar ${(retryAfterMs / 1000).toFixed(1)}s (> ${AIAnalysisEngine.RETRY_AFTER_HARD_LIMIT_MS / 1000}s) → abandonar y fallback local`);
@@ -191,32 +206,44 @@ export class AIAnalysisEngine {
         );
     }
 
-    // Provider por defecto: Groq. El usuario puede cambiarlo a Gemini como modo
-    // experimental seteando localStorage['pianoStudy.aiProvider'] = 'gemini'.
-    //
-    // Cuidado: Gemini para texto CONSUME el mismo cupo diario que la escucha
-    // de audio (GeminiAudioAnalyzer). En sesiones con mucha grabación puede
-    // agotar cupo antes de tiempo. Está pensado como A/B experimental para
-    // comparar calidad, no como default.
-    //
-    // Valores válidos: 'groq' (default) | 'gemini'.
-    static _getProvider() {
-        try {
-            const stored = typeof localStorage !== 'undefined'
-                ? localStorage.getItem('pianoStudy.aiProvider')
-                : null;
-            return stored === 'gemini' ? 'gemini' : 'groq';
-        } catch { return 'groq'; }
+    async callOpenRouter(prompt, systemPrompt = null, options = {}) {
+        // OpenRouter usa el schema OpenAI compat (mismo shape que Groq),
+        // así que el extractor es idéntico.
+        return this._callProviderWithRetry(
+            'OpenRouter', 'openrouter-proxy', prompt, systemPrompt, options,
+            (body) => body?.choices?.[0]?.message?.content,
+        );
     }
 
-    // Enruta al proveedor activo. Si Groq falla NO cae a Gemini (y viceversa)
-    // — cada modo es explícito, para que el A/B sea limpio. El caller decide
-    // qué hacer con el error (fallback local o mensaje al usuario).
-    async callAI(prompt, systemPrompt = null, options = {}) {
-        const provider = AIAnalysisEngine._getProvider();
-        if (provider === 'gemini') {
-            return await this.callGemini(prompt, systemPrompt, options);
-        }
+    // Ruteo por rol con override opcional desde localStorage — útil para
+    // A/B manual en dev sin recompilar:
+    //   localStorage['pianoStudy.provider.chat'] = 'openrouter'
+    //   localStorage['pianoStudy.provider.analysis'] = 'groq'
+    // Valores válidos: 'groq' | 'gemini' | 'openrouter'. Defaults por rol:
+    //   - chat (mascota + chat del análisis): SIEMPRE Groq. El chat es la única
+    //     superficie donde Groq luce (respuestas cortas, latencia baja, sirve
+    //     de sobra dentro de los 8K TPM del free tier con el guard de tamaño).
+    //     No cambiar a Gemini/OpenRouter por default — se busca "chat pega
+    //     rápido, análisis piensa profundo".
+    //   - analysis: Gemini. Groq compound dejó de ser viable en 2026-08 porque
+    //     su free tier bajó a 8K TPM y el prompt de análisis pesa ~11K → rebota
+    //     con 413. Queda disponible bajo demanda vía el chip de proveedor.
+    static _getProvider(role = 'analysis') {
+        try {
+            const override = typeof localStorage !== 'undefined'
+                ? localStorage.getItem(`pianoStudy.provider.${role}`) : null;
+            if (override === 'groq' || override === 'gemini' || override === 'openrouter') {
+                return override;
+            }
+        } catch { /* localStorage no disponible (SSR/test) — ignoramos */ }
+        if (role === 'chat') return 'groq';
+        return 'gemini';
+    }
+
+    async callAI(prompt, systemPrompt = null, options = {}, role = 'analysis') {
+        const provider = AIAnalysisEngine._getProvider(role);
+        if (provider === 'gemini') return await this.callGemini(prompt, systemPrompt, options);
+        if (provider === 'openrouter') return await this.callOpenRouter(prompt, systemPrompt, options);
         return await this.callGroq(prompt, systemPrompt, options);
     }
 
@@ -243,30 +270,75 @@ export class AIAnalysisEngine {
             && (auditoryObservations.auditory_observations?.length
                 || auditoryObservations.strengths?.length
                 || auditoryObservations.areas_to_explore?.length));
-        const provider = AIAnalysisEngine._getProvider();
-        try {
-            rawText = await this.callAI(userPrompt, systemPrompt, options);
-            providerUsed = provider;
-            const parsed = this.parseAIResponse(rawText);
-            const validation = this.validateAnalysisSchema(parsed);
-            if (validation.ok) {
-                const baseSource = `ai-${provider}`;
-                validation.value.source = hasAudioLayer ? `${baseSource}+audio` : baseSource;
-                return validation.value;
+        // Ruteo del análisis: usa el proveedor configurado por el usuario
+        // (localStorage/chip → 'gemini' | 'groq' | 'openrouter'). Antes
+        // forzábamos Groq para MIDI "porque es texto puro"; se revirtió porque
+        // en el free tier de Groq (2026-08) los chat models están capados a
+        // 8K TPM y el prompt de análisis pesa ~11K → todo MIDI fallaba con 413
+        // sin poder retriar. El fallback cruzado ya cubre el caso "Gemini 503"
+        // que era el motivo original del ruteo especial.
+        const provider = AIAnalysisEngine._getProvider('analysis');
+        // Hasta 3 intentos totales cubriendo también parse/schema inválido:
+        // el retry HTTP interno de _callProviderWithRetry ya se ocupa de 429/5xx,
+        // pero antes cuando la respuesta era JSON malformado o le faltaba
+        // un campo, íbamos directo al fallback aunque un segundo intento
+        // podía salir bien. Ahora reintentamos también esos casos.
+        const MAX_CONTENT_ATTEMPTS = 3;
+        let lastReason = null;
+        let lastParsed = null;
+        let networkError = null;
+        for (let attempt = 0; attempt < MAX_CONTENT_ATTEMPTS; attempt++) {
+            try {
+                // Ruteo explícito por proveedor — antes el ternario tenía solo
+                // dos ramas y openrouter caía silenciosamente a Gemini. El log
+                // decía "openrouter no disponible" pero el error venía de Gemini,
+                // rompiendo el A/B y confundiendo el debug.
+                rawText = provider === 'groq'
+                    ? await this.callGroq(userPrompt, systemPrompt, options)
+                    : provider === 'openrouter'
+                        ? await this.callOpenRouter(userPrompt, systemPrompt, options)
+                        : await this.callGemini(userPrompt, systemPrompt, options);
+                providerUsed = provider;
+                const parsed = this.parseAIResponse(rawText);
+                const validation = this.validateAnalysisSchema(parsed);
+                if (validation.ok) {
+                    const baseSource = `ai-${provider}`;
+                    validation.value.source = hasAudioLayer ? `${baseSource}+audio` : baseSource;
+                    return validation.value;
+                }
+                lastReason = validation.reason;
+                lastParsed = parsed;
+                console.warn(`AI response invalid (intento ${attempt + 1}/${MAX_CONTENT_ATTEMPTS}):`, validation.reason, '\nRaw:', rawText.slice(0, 500));
+                // Early exit: si el modelo devuelve texto plano (parseAIResponse
+                // devolvió no-objeto — típicamente chain-of-thought o markdown),
+                // reintentar NO va a mejorar: el modelo elige no respetar JSON
+                // mode. Cortar acá evita 30s de espera inútil para caer al
+                // fallback igual. Si vino un objeto malformado (falta un campo),
+                // el reintento SÍ puede rescatarlo, así que solo cortamos cuando
+                // el parse mismo falló.
+                if (validation.reason === 'not-an-object') {
+                    console.warn(`${provider}: chain-of-thought en vez de JSON — no reintento, el modelo no respeta JSON mode`);
+                    break;
+                }
+            } catch (error) {
+                networkError = error;
+                console.error(`${provider} no disponible (intento ${attempt + 1}/${MAX_CONTENT_ATTEMPTS}):`, error);
+                break; // el retry HTTP ya se hizo dentro; no reintentar acá.
             }
-            console.warn('AI response invalid schema:', validation.reason, '\nRaw:', rawText.slice(0, 500));
-            const fallback = this.getFallbackAnalysis(audioAnalysis);
-            fallback.source = parsed ? 'fallback-schema-invalid' : 'fallback-parse-error';
-            return fallback;
-        } catch (error) {
-            // Ningún fallback cruzado entre proveedores: si el activo falla, va
-            // directo al fallback local. Groq y Gemini son modos explícitos y
-            // se comparan limpios en el A/B.
-            console.error(`${provider} no disponible → fallback local:`, error);
-            const fallback = this.getFallbackAnalysis(audioAnalysis);
-            fallback.source = 'fallback-network';
-            return fallback;
         }
+        // Sin fallback cruzado: el pianista elige explícitamente el proveedor
+        // con el chip "Motor de IA" y esperamos que respete su elección
+        // (importante para A/B de calidad — cambiar el modelo por atrás
+        // enmascara qué proveedor funciona bien). Si el elegido falla, cae al
+        // fallback local (heurístico) y el badge del panel lo muestra como
+        // "fallback-network"/"fallback-schema-invalid" para que veas qué pasó.
+        const fallback = this.getFallbackAnalysis(audioAnalysis);
+        if (networkError) {
+            fallback.source = 'fallback-network';
+        } else {
+            fallback.source = lastParsed ? 'fallback-schema-invalid' : 'fallback-parse-error';
+        }
+        return fallback;
     }
 
     // Fase B3 del reposicionamiento SRL — delimitador de objetivos vagos.
@@ -315,18 +387,41 @@ Reglas:
         }
     }
 
-    async answerQuestion(audioAnalysis, aiAnalysis, question, chatHistory = []) {
+    // ctx (opcional): { metadata, reliability, studentMemory }.
+    //   metadata: estilo/nivel/objetivo/notas declarados por el pianista.
+    //   reliability: salida de assessAnalysis — el chat aplica el mismo hedge
+    //     que el análisis (no afirmar tonalidad si key.reliability es low, etc.).
+    //   studentMemory: salida de buildStudentMemory — para dar continuidad con
+    //     sesiones previas ("como te vengo comentando desde hace 3 sesiones...").
+    async answerQuestion(audioAnalysis, aiAnalysis, question, chatHistory = [], focusRegion = null, ctx = {}) {
         const q = String(question || '').trim();
         if (!q) return 'Escribí una pregunta para poder ayudarte.';
 
-        const { systemPrompt, userPrompt } = this.buildQuestionPrompt(audioAnalysis, aiAnalysis, q, chatHistory);
+        const { systemPrompt, userPrompt } = this.buildQuestionPrompt(audioAnalysis, aiAnalysis, q, chatHistory, focusRegion, ctx);
+        // Cap de respuesta: 500 tokens = 2-4 párrafos cortos, suficiente para
+        // el formato pedido en el systemPrompt. Antes era 800 pero Groq factura
+        // el max contra TPM aunque el modelo no lo use → con 8K TPM en free
+        // tier (2026-08) sumaba innecesariamente al total. Si un chat pide más,
+        // el pianista puede pedirlo con "explayate más" (nueva request, otro
+        // minuto de ventana TPM).
+        const options = { temperature: 0.6, maxOutputTokens: 500 };
+        // Sin fallback cruzado: si el pianista eligió Groq (o cualquier otro
+        // via chip), respetamos su elección. Cambiar de proveedor por atrás
+        // enmascara el problema real y arruina el A/B. Si falla, mostramos
+        // fallback heurístico y logueamos el error para debug.
+        const provider = AIAnalysisEngine._getProvider('chat');
         try {
-            const text = await this.callAI(userPrompt, systemPrompt, { temperature: 0.6 });
-            return text || this.getFallbackAnswer(audioAnalysis, aiAnalysis, q, true);
-        } catch (error) {
-            console.error(`AI Q&A no disponible (${AIAnalysisEngine._getProvider()} falló, sin fallback cruzado):`, error);
-            return this.getFallbackAnswer(audioAnalysis, aiAnalysis, q, true);
+            const text = provider === 'gemini'
+                ? await this.callGemini(userPrompt, systemPrompt, options)
+                : provider === 'openrouter'
+                    ? await this.callOpenRouter(userPrompt, systemPrompt, options)
+                    : await this.callGroq(userPrompt, systemPrompt, options);
+            if (text) return text;
+            console.warn(`Chat ${provider}: respuesta vacía`);
+        } catch (err) {
+            console.error(`Chat ${provider} falló:`, err?.message || err);
         }
+        return this.getFallbackAnswer(audioAnalysis, aiAnalysis, q, true);
     }
 
     // Valida que el objeto parseado tenga la forma esperada por displayAnalysisResults.
@@ -1005,6 +1100,21 @@ Reglas:
             }
         }
 
+        // Reparto por registro pianístico — CONVENCIÓN de la app:
+        // grave = acompañamiento/bajo (mano izq), agudo = melodía (mano der),
+        // zona A3–A4 = puede ser cualquiera. La IA no puede inferir esto solo
+        // del pitch, así que se lo damos explícito (aplica a MIDI directo y a
+        // audio→MIDI vía basic-pitch).
+        const handRoles = derived.handRoles;
+        if (handRoles && handRoles.totalNotes > 0) {
+            const pct = (v) => `${Math.round(v * 100)}%`;
+            const b = handRoles.bass, t = handRoles.transition, m = handRoles.melody;
+            lines.push('- REPARTO POR REGISTRO (convención piano — usá esto para hablar de MANOS y ROLES musicales):');
+            lines.push(`  · Registro grave (hasta Ab3 · MANO IZQUIERDA típica — bajo/acompañamiento/comping): ${b.count} notas (${pct(b.share)}), ${b.perSecond}/s, simultaneidad ${pct(b.simultaneity)} ${b.simultaneity > 0.25 ? '→ hay acordes/comping' : '→ notas separadas, línea de bajo o walking'}.`);
+            lines.push(`  · Zona intermedia (A3–A4, alrededor del do central · CUALQUIERA — izquierda extendida O melodía que baja): ${t.count} notas (${pct(t.share)}), ${t.perSecond}/s, simultaneidad ${pct(t.simultaneity)}. Mirá contexto: si acompaña al grave = izquierda extendida; si es rápido con notas sueltas = melodía bajando.`);
+            lines.push(`  · Registro agudo (desde Bb4 · MANO DERECHA típica — melodía/improvisación/solo): ${m.count} notas (${pct(m.share)}), ${m.perSecond}/s, simultaneidad ${pct(m.simultaneity)} ${m.simultaneity > 0.15 ? '→ hay voicings/bloques melódicos' : '→ línea melódica de una sola voz'}.`);
+        }
+
         if (lines.length === 1) return '';
         return lines.join('\n');
     }
@@ -1042,9 +1152,17 @@ Reglas:
 
         const systemPrompt = `Sos profesor de piano de jazz (mainstream: bebop, cool, modal, post-bop, hard bop, standards; también afrocubano, latin jazz, jazz colombiano y bolero). Voseo rioplatense, cálido y específico, sin frases motivacionales vacías.
 
+REGLA 0 — DATOS RESERVADOS (SOBRE TODAS LAS OTRAS):
+Los siguientes datos son SOLO para tu razonamiento interno. NUNCA los menciones en tu respuesta al usuario, ni en musicalAnalysis, ni en strengths, ni en observations, ni en primaryFocus, ni en el ejercicio, ni en nextGoal, ni en beliefVsDetection, ni en metacognitiveQuestion:
+- El tempo en BPM (ningún número seguido de "BPM", ni "beats por minuto", ni "pulsaciones por minuto").
+- El nombre concreto de la tonalidad (nada de "Do mayor", "F# menor", "A Mixolydian", "Bb dorio", etc.).
+- La puntuación / score (nada de "7/10", "una sesión de 8", "puntuación media", "score bajo", ni referencias a que hay una nota numérica).
+- Los porcentajes de confianza o fuerza detectados.
+Si necesitás hablar de ritmo, tonalidad o calidad global, usá lenguaje cualitativo neutro: "un pulso estable", "el centro tonal se mantiene", "hay pasajes más seguros y otros más dudosos". El schema JSON sigue incluyendo overallScore como campo, pero NO lo verbalices en ningún texto humano. Si te descubrís mencionando cualquiera de esos datos, reescribí la frase.
+
 ARQUITECTURA (3 capas): (1) análisis local — Essentia/basic-pitch. (2) PERCEPCIÓN AUDITIVA — Gemini, cuando aparece en el userPrompt. (3) VOS — combinás capas + memoria en pedagogía útil. Nunca digas "escuché"; decí "los datos muestran" o hablá musicalmente. Si un dato no da para interpretación honesta, mejor "no se puede evaluar con estos datos" que inventar.
 
-LAS 12 REGLAS (aplican todas):
+LAS 12 REGLAS (aplican todas, subordinadas a la REGLA 0):
 
 R1. MÉTRICA SOLO SI SIRVE PARA UNA DECISIÓN MUSICAL (elegir metrónomo, cambiar dinámica, qué practicar). Si no, omitila.
 
@@ -1082,6 +1200,12 @@ R10. beliefVsDetection (SOLO si vino AUTOEVALUACIÓN). UNA oración contrastando
 R11. metacognitiveQuestion — pregunta abierta final, máx 120 chars. UNA de tres formas: reflexión sobre proceso, verificación futura, exploración lateral. Prohibido: "¿te gustó?", "¿te sentiste bien?", "¿tenés dudas?", preguntas sobre datos ya en el análisis.
 
 R12. VOCABULARIO MUSICAL. Cuando aparece "VOCABULARIO MUSICAL DISPONIBLE" en el userPrompt, esa lista es lo que el sistema considera aplicable (filtrado por reliability + estilo + evidencia). NO es obligatoria — usá SOLO lo que la evidencia de ESTA sesión respalde. Preferí término sencillo antes que especializado sin justificar. NO uses terminología avanzada para aparentar profundidad. Respetá "NO: ..." (restricción dura). Si un concepto no está en la lista, el sistema no lo respaldó — no lo uses. Prohibido definir términos al pianista (no es un glosario); si el nivel es 'principiante'/'básico', usá sinónimos accesibles.
+
+R13. REGISTRO Y ROLES DE MANO (convención del piano). El teclado se parte alrededor del Do central (C4).
+- Grave (hasta Ab3, MIDI ≤ 56): territorio de la MANO IZQUIERDA — bajo, walking bass, tumbao/montuno, comping, acordes de acompañamiento.
+- Agudo (desde Bb4, MIDI ≥ 70): territorio de la MANO DERECHA — melodía, improvisación, líneas de solo.
+- Zona intermedia (A3–A4, MIDI 57–69): AMBIGUA — la izquierda puede subir con acordes extendidos y la derecha puede bajar con frases melódicas. NO fuerces un rol: mirá simultaneidad (varias notas al mismo tiempo → probable acompañamiento extendido) y patrón temporal (notas sueltas y rápidas → probable melodía bajando).
+Cuando el userPrompt trae "REPARTO POR REGISTRO", usalo literalmente para hablar de MANOS y roles: "en el bajo el groove se afloja" vs "en la línea melódica la digitación se traba". Prohibido tratar una nota aislada aguda como acompañamiento o una nota aislada grave como melodía sin evidencia rítmica. Aplica igual con MIDI directo o con audio→MIDI (basic-pitch): la convención es del piano, no del captor.
 
 CONOCIMIENTO DE DOMINIO — Jazz: bebop scales, ii-V-I, tritone sub, modal, cool, post-bop, standards, compases irregulares (5/4, 7/4, 3/4 con swing), reharmonización, voicings (drop 2, rootless, quartal), walking bass. Referentes: Evans, Powell, Monk, Herbie, McCoy, Chick, Keith Jarrett, Oscar, Mehldau, Brubeck. Estilos afines: son cubano/clave, latin jazz, bolero, jazz colombiano. Reglas: 5/4 con swing → jazz experimental, NUNCA bolero. 7/4 o 6/8 con swing → jazz/prog, NO afrocubano. Etiquetas de estilo solo si el usuario lo declaró o hay ENFOQUE por estilo. Ante duda: técnico sin etiqueta.
 
@@ -1159,7 +1283,20 @@ Reglas finales de emisión: 2-4 steps por ejercicio; 2-5 moments distribuidos en
               })`
             : 'no detectado';
 
-        const userPrompt = `${reliabilityBlock ? reliabilityBlock + '\n\n' : ''}DATOS DE LA GRABACIÓN (ya en lenguaje musical — usalos así, NO los reconviertas a números):
+        // Bloque especial cuando la grabación vino de un teclado MIDI directo:
+        // las notas son EXACTAS (no transcripción de audio), no hay dinámica de
+        // amplitud ni color de timbre. Se lo aclaramos al modelo para que no
+        // hable de "articulación estimada" ni "timbre percibido".
+        const midiSource = audioAnalysis?.source === 'midi-input';
+        const midiBlock = midiSource
+            ? `FUENTE DE LA GRABACIÓN: MIDI directo (teclado). Las notas y velocidades son EXACTAS (no transcritas de audio). Como consecuencia:
+- NO hay información de timbre ni de dinámica global de amplitud (no menciones "color", "timbre" ni "loudness").
+- La articulación real (staccato/legato pedaleado) NO se puede afirmar sin pedal — reservate al hecho MIDI.
+- Podés hablar libremente de notas, patrones, densidad, fraseo, timing.
+`
+            : '';
+
+        const userPrompt = `${midiBlock}${reliabilityBlock ? reliabilityBlock + '\n\n' : ''}DATOS DE LA GRABACIÓN (ya en lenguaje musical — usalos así, NO los reconviertas a números):
 - Duración total: ${duration.toFixed(1)} segundos
 - Tempo: ${tempoStatement}
 - Tonalidad: ${keyStatement}
@@ -1178,66 +1315,265 @@ Devolvé el objeto JSON según el schema del system. Los moments deben caer dent
         return { systemPrompt, userPrompt };
     }
 
-    buildQuestionPrompt(audioAnalysis, aiAnalysis, question, chatHistory = []) {
+    // Ceiling de tokens del userPrompt del chat. Groq compound-mini en free tier
+    // rechaza inputs grandes con 413; medido empíricamente los 6-7k tokens de
+    // userPrompt disparan el error. Este ceiling deja margen para el
+    // systemPrompt (~400) y la respuesta (800), quedando bajo el TPM del free
+    // tier (12k). Si buildQuestionPrompt supera esto, va tirando bloques
+    // opcionales por orden inverso hasta caber.
+    static CHAT_PROMPT_TOKEN_CEILING = 3500;
+
+    // Detección por keywords en la pregunta del pianista. Retrieval liviano:
+    // en vez de dumpear TODO el análisis siempre (lo que causó el 413), solo
+    // incluimos los bloques cuya categoría la pregunta menciona. Regex simples,
+    // en español (voseo/tuteo), tolerantes a variaciones.
+    static _chatKeywordFlags(question) {
+        const q = String(question || '').toLowerCase();
+        return {
+            wantsObservations: /observ|coment|eso que|lo que dijist|por qu[eé]|dijist|marcast|se[ñn]al/.test(q),
+            wantsMoments:      /segund|minut|d[oó]nde|cu[aá]ndo|en qu[eé]\s+(part|moment)|timestamp/.test(q),
+            wantsMemory:       /antes|[uú]ltim|vengo|sesi[oó]n\s+(pasad|anterior)|siempre|repetid|hist[oó]ric|progres/.test(q),
+            wantsReliability:  /tempo|bpm|pulso|ritm|tonalid|clave|escala|modo|arm[oó]n/.test(q),
+            wantsExercise:     /ejercic|practic|c[oó]mo\s+(lo\s+)?(trabaj|estudi)|rutina/.test(q),
+            wantsMusicalContext: /an[aá]lisis|resum|qu[eé]\s+(pas[oó]|hice|toqu[eé])|c[oó]mo\s+me\s+fue/.test(q),
+        };
+    }
+
+    buildQuestionPrompt(audioAnalysis, aiAnalysis, question, chatHistory = [], focusRegion = null, ctx = {}) {
         const safeAi = aiAnalysis && typeof aiAnalysis === 'object' ? aiAnalysis : {};
-        const musicalAnalysis = String(safeAi.musicalAnalysis || '').slice(0, 800);
+        const musicalAnalysisFull = String(safeAi.musicalAnalysis || '').trim();
         const exerciseTitle = safeAi.practiceExercise?.title
             || (Array.isArray(safeAi.practiceSuggestions) ? safeAi.practiceSuggestions[0]?.title : '')
             || '';
+        const exerciseSteps = Array.isArray(safeAi.practiceExercise?.steps)
+            ? safeAi.practiceExercise.steps.filter(s => typeof s === 'string' && s.trim()).slice(0, 4)
+            : [];
+        const primaryFocus = String(safeAi.primaryFocus || '').trim();
         const nextGoal = String(safeAi.nextGoal || '').trim();
-        const tempo = Number(audioAnalysis?.tempo?.bpm || audioAnalysis?.tempo || 0);
-        const keyName = audioAnalysis?.key?.key || audioAnalysis?.pitch || 'Desconocida';
-        const keyScale = audioAnalysis?.key?.scale || '';
-        const keyStrength = Number(audioAnalysis?.key?.strength || 0);
-        const tempoConfidence = Number(audioAnalysis?.tempo?.confidence || 0);
-        const loudnessAvg = Number(audioAnalysis?.loudness?.average || audioAnalysis?.loudness?.db || 0);
-        const dynamic = Number(audioAnalysis?.loudness?.dynamicComplexity || 0);
+        const beliefVsDetection = String(safeAi.beliefVsDetection || '').trim();
+        const strengths = Array.isArray(safeAi.strengths)
+            ? safeAi.strengths.filter(s => typeof s === 'string' && s.trim()).slice(0, 2)
+            : [];
+        const observations = Array.isArray(safeAi.observations)
+            ? safeAi.observations
+                .filter(o => o && typeof o === 'object' && (o.fact || o.interpretation))
+                .slice(0, 3)
+            : [];
+        const moments = Array.isArray(safeAi.moments)
+            ? safeAi.moments
+                .filter(m => m && typeof m === 'object' && m.note)
+                .slice(0, 5)
+            : [];
 
-        const systemPrompt = `Sos NeuralJam, el asistente conversacional de PianoStudy. Cuando el usuario te pregunta acá, actuás como profesor de piano de JAZZ con 20 años de experiencia. Tu área principal es el jazz mainstream (bebop, cool, modal, post-bop, hard bop, standards, straight-ahead). También sabés de música afrocubana, latin jazz, jazz colombiano y bolero, pero NO son tu default. Si te preguntan quién sos, decís "NeuralJam" — sin describir tu apariencia.
+        // Bandas cualitativas — mismas que buildAnalysisPrompt usa para no leakear
+        // BPM/tonalidad/score. La REGLA 0 le pide al modelo no exponer los números;
+        // ahora el prompt tampoco se los pone en bandeja.
+        const tempo = audioAnalysis?.tempo || {};
+        const key = audioAnalysis?.key || {};
+        const loudness = audioAnalysis?.loudness || {};
+        const tempoConfBand = AIAnalysisEngine._confidenceBand(Number(tempo.confidence || 0));
+        const keyStrengthBand = AIAnalysisEngine._confidenceBand(Number(key.strength || 0));
+        const dynBand = AIAnalysisEngine._dynamicSpreadBand(Number(loudness.dynamicComplexity || 0));
+        const timbreBand = AIAnalysisEngine._timbreBand(Number(audioAnalysis?.spectralCentroid || 0));
 
-TONO: reflexivo, honesto, directo. Voseo rioplatense, profesor guiando a un colega. Sin frases motivacionales vacías, sin relleno, sin "¡Excelente pregunta!" ni "¡Con gusto!". Empezá por la respuesta. Si no sabés algo o los datos son ambiguos, decilo. Si el estudiante está equivocado, corregilo con respeto, no le des la razón para no incomodar.
+        // Contexto extra opcional (metadata declarada por el pianista, capa de
+        // reliability, memoria del estudiante). Todos safe-null: si el caller
+        // no los pasa, los bloques no aparecen y el prompt vuelve al comportamiento
+        // anterior salvo por las bandas cualitativas.
+        const metadata = (ctx && typeof ctx === 'object' && ctx.metadata) ? ctx.metadata : null;
+        const reliability = (ctx && typeof ctx === 'object' && ctx.reliability) ? ctx.reliability : null;
+        const studentMemory = (ctx && typeof ctx === 'object' && ctx.studentMemory) ? ctx.studentMemory : null;
 
-CONOCIMIENTO:
-- Jazz: bebop y escalas bebop, ii-V-I y sustitución de tritono, modal, cool, post-bop, standards, compases irregulares (5/4, 7/4, 3/4 con swing), reharmonización, voicings (drop 2, rootless, quartal), walking bass en piano.
-- Referentes: Bill Evans, Bud Powell, Monk, Herbie Hancock, McCoy Tyner, Chick Corea, Keith Jarrett, Oscar Peterson, Brad Mehldau, Dave Brubeck.
-- Estilos afines: son cubano y clave, latin jazz, bolero, jazz colombiano.
+        const styleKey = String(metadata?.style || '').toLowerCase().replace(/[\s_-]/g, '');
+        const styleGuidance = AIAnalysisEngine.STYLE_GUIDANCE[styleKey] || '';
 
-REGLAS DE ESTILO Y CERTEZA:
-- Si el estudiante no declaró estilo y las señales no son claras, NO le pongas etiqueta de género. Hablá técnico. Ante la duda: jazz.
-- Si la confianza del tempo o la fuerza de tonalidad detectadas fueron bajas, aclará explícitamente que los datos son inciertos antes de afirmar cifrado o modo.
+        // Retrieval por keywords: solo incluimos los bloques que la pregunta pide.
+        // Esto es lo que evita el 413 del chat — antes dumpeábamos todo siempre.
+        const flags = AIAnalysisEngine._chatKeywordFlags(question);
+        const hasFocus = focusRegion && Number.isFinite(focusRegion.start) && Number.isFinite(focusRegion.end)
+            && focusRegion.end > focusRegion.start;
 
-FORMATO DE RESPUESTA:
-- 2-4 párrafos cortos, prosa. Sin encabezados ni bullets salvo que ayuden a describir un ejercicio paso a paso.
-- Pasos concretos: BPM exacto o rango, compás, nombre de escala/modo, grado del acorde (ej. "ii-V-I en Do mayor: Dm7 → G7 → Cmaj7").
-- Armonía: sugerí voicings concretos (qué notas, no solo el nombre del acorde) o la progresión completa.
-- Técnica: posición de manos, digitación o movimiento específico.
-- Si no tenés contexto suficiente, pedí que aclaren estilo/tonalidad/compás — es mejor preguntar que dar consejo vago.
-- Referenciá el análisis previo, el ejercicio o el nextGoal cuando la pregunta se conecte con eso.`;
+        // Reliability solo si la pregunta menciona algo que se pueda hedgear.
+        const reliabilityBlock = (reliability && flags.wantsReliability)
+            ? this.formatReliabilityBlock(reliability) : '';
 
-        // Últimos 6 turnos de conversación previa (excluyendo la pregunta actual que
-        // se agrega abajo). Esto le permite al modelo entender "el ejercicio anterior"
-        // o "y para eso último que me dijiste..." sin que se sienta perdido.
+        // Memoria solo si la pregunta refiere a continuidad. El caller le pasó
+        // buildStudentMemory() ya, pero no tiene sentido gastar 300 tokens en cada
+        // pregunta cuando la mayoría no van sobre progresión histórica.
+        const memoryBlock = (studentMemory && flags.wantsMemory)
+            ? this.formatStudentMemory(studentMemory) : '';
+
+        // Notas MIDI del fragmento en foco. Si NO hay región marcada esto queda
+        // vacío. Si hay, cap 15 (era 40 — con 40 solo esto ya son ~1500 tokens).
+        let focusNotesBlock = '';
+        if (hasFocus) {
+            const allNotes = Array.isArray(audioAnalysis?.midiNotes) ? audioAnalysis.midiNotes : [];
+            const noteName = (m) => {
+                const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+                const midi = Math.round(Number(m) || 0);
+                if (midi < 12 || midi > 127) return '?';
+                return `${names[midi % 12]}${Math.floor(midi / 12) - 1}`;
+            };
+            const inRange = allNotes
+                .filter(n => {
+                    const start = Number(n?.startTimeSeconds ?? n?.start ?? 0);
+                    return start >= focusRegion.start && start <= focusRegion.end;
+                })
+                .slice(0, 15)
+                // Formato densísimo: t=X.XXs d=Y.YY N amp=Z.ZZ en UNA línea.
+                .map(n => {
+                    const start = Number(n?.startTimeSeconds ?? n?.start ?? 0);
+                    const dur = Number(n?.durationSeconds ?? n?.duration ?? 0);
+                    const pitchMidi = Number(n?.pitchMidi ?? n?.pitch ?? 0);
+                    const amp = Number(n?.amplitude ?? 0);
+                    return `t=${start.toFixed(2)} d=${dur.toFixed(2)} ${noteName(pitchMidi)} a=${amp.toFixed(2)}`;
+                });
+            if (inRange.length) {
+                focusNotesBlock = `NOTAS MIDI EN EL FRAGMENTO EN FOCO (${inRange.length}):\n${inRange.join(' | ')}\n`;
+            }
+        }
+
+        // Moments solo si la pregunta refiere a timestamps. Cap 4, formato una línea.
+        const momentsBlock = (moments.length && flags.wantsMoments)
+            ? `MOMENTOS ANOTADOS:\n${moments.slice(0, 4).map(m => {
+                const s = Number(m.timeStart) || 0;
+                const e = Number(m.timeEnd) || s;
+                return `- ${s.toFixed(1)}→${e.toFixed(1)}s [${m.kind}] ${String(m.note || '').slice(0, 100)}`;
+            }).join('\n')}\n`
+            : '';
+
+        // Observations en formato compacto (una línea por capa, cap 100 chars c/u)
+        // y solo si la pregunta las referencia. Al pianista le importan cuando
+        // pregunta por lo que ve en pantalla, no en cada consulta.
+        const observationsBlock = (observations.length && flags.wantsObservations)
+            ? `OBSERVACIONES:\n${observations.map((o, i) => {
+                const fact = String(o.fact || '').slice(0, 100);
+                const interp = String(o.interpretation || '').slice(0, 100);
+                const reco = String(o.recommendation || '').slice(0, 100);
+                return `${i + 1}. ${fact} → ${interp} → ${reco} (${o.confidence || 'medium'})`;
+            }).join('\n')}\n`
+            : '';
+
+        // Ejercicio solo si la pregunta refiere a práctica.
+        const exerciseBlock = (exerciseTitle && flags.wantsExercise)
+            ? `EJERCICIO RECOMENDADO: "${exerciseTitle}"${exerciseSteps.length ? ` — pasos: ${exerciseSteps.map((s, i) => `(${i + 1}) ${s}`).join(' ')}` : ''}\n`
+            : '';
+
+        // Musical analysis: incluir SIEMPRE pero cortado. Sirve como narrativa
+        // base y el pianista lo tiene en pantalla. Con wantsMusicalContext=true
+        // le damos más margen.
+        const musicalAnalysisMax = flags.wantsMusicalContext ? 700 : 300;
+        const musicalAnalysis = musicalAnalysisFull.slice(0, musicalAnalysisMax);
+
+        // Contexto declarado — siempre chico (5-15 tokens), va siempre.
+        const declaredLines = [];
+        if (metadata?.style) declaredLines.push(`estilo=${metadata.style}`);
+        if (metadata?.level) declaredLines.push(`nivel=${metadata.level}`);
+        if (metadata?.objective) declaredLines.push(`objetivo=${String(metadata.objective).slice(0, 120)}`);
+        const declaredBlock = declaredLines.length
+            ? `DECLARADO: ${declaredLines.join(' · ')}\n`
+            : '';
+
+        // Strengths — chico, va siempre si existe (dos líneas máx).
+        const strengthsBlock = strengths.length
+            ? `FORTALEZAS: ${strengths.slice(0, 2).join(' · ')}\n`
+            : '';
+
+        const systemPrompt = `Sos NeuralJam, el asistente conversacional de PianoStudy. Este canal es el chat de análisis: el pianista acaba de grabarse y quiere entender/mejorar su interpretación. Actuás como profesor de piano de jazz con 20 años de experiencia (bebop, cool, modal, post-bop, hard bop, standards; también son cubano, latin jazz, jazz colombiano, bolero). Si te preguntan quién sos, decís "NeuralJam".
+
+REGLA 0 — DATOS RESERVADOS: NUNCA menciones al pianista BPM en cifras, nombres de tonalidad (Do mayor, F# menor, A Mixolydian…), score numérico, ni porcentajes de confianza. Usá lenguaje cualitativo ("pulso estable", "centro tonal claro", "pasajes más seguros"). Si te preguntan por esos datos directamente, decí que no los exponés y ofrecé una lectura cualitativa.
+
+TONO: reflexivo, honesto, directo, voseo rioplatense. Sin motivacional vacío, sin "¡Excelente pregunta!", sin "espero haberte ayudado". Empezá por la respuesta. Si no sabés o los datos son ambiguos, decilo. Corregí al pianista con respeto cuando esté equivocado.
+
+USO DEL CONTEXTO: te paso solo los bloques relevantes a esta pregunta (retrieval). Si aparece OBSERVACIONES/MOMENTOS/EJERCICIO son los que el pianista está viendo en su pantalla — identificalos por el fact/nota, referencialos en segundos. Si aparecen NOTAS MIDI EN EL FRAGMENTO EN FOCO, basá tu respuesta EN esas notas (patrón, dirección, saltos, disonancias) — no hables en general del pasaje. Si aparece CAPA DE CONFIABILIDAD y algo es unreliable, aclará que no es afirmable y no recomiendes cosas que dependan de eso (nada de cifrado/armonía con key unreliable).
+
+REGISTRO Y ROLES DE MANO (convención del piano): grave (hasta Ab3) = MANO IZQUIERDA (bajo/comping/tumbao), agudo (desde Bb4) = MANO DERECHA (melodía/solo), zona A3–A4 = ambigua (izquierda extendida o melodía bajando). Cuando el bloque REPARTO viene en el contexto, usalo para nombrar los roles al pianista ("en el bajo…", "en la línea melódica…") — no atribuyas mano por una nota aislada.
+
+FORMATO: 2-4 párrafos cortos, prosa. Sin bullets salvo pasos de ejercicio. Grado del acorde relativo (ii-V-I) salvo que el pianista ya haya dicho la tonalidad. Voicings concretos (qué grado, qué tensiones). Si falta contexto, pedí una aclaración antes que consejo vago. Al cierre, si aporta, UNA idea para probar.`;
+
+        // Historia recortada — 3 turnos, cap 200 chars c/u. Era 6×500 = 3000
+        // chars solo por el history (750 tokens); ahora ~600 chars (~150 tokens).
         const historyBlock = Array.isArray(chatHistory) && chatHistory.length
-            ? `CONVERSACIÓN PREVIA (últimos turnos, orden cronológico):\n${chatHistory
-                .slice(-6)
-                .map(m => `${m.role === 'user' ? 'ESTUDIANTE' : 'NEURALJAM'}: ${String(m.text || '').slice(0, 500)}`)
+            ? `CONV PREVIA:\n${chatHistory
+                .slice(-3)
+                .map(m => `${m.role === 'user' ? 'E' : 'N'}: ${String(m.text || '').slice(0, 200)}`)
                 .join('\n')}\n`
             : '';
 
-        const userPrompt = `CONTEXTO DE LA GRABACIÓN:
-- Duración: ${(audioAnalysis?.duration ?? 0).toFixed(1)}s
-- Tempo detectado: ${tempo} BPM (confianza ${(tempoConfidence * 100).toFixed(0)}%)
-- Tonalidad estimada: ${keyName} ${keyScale} (fuerza ${(keyStrength * 100).toFixed(0)}%)
-- Loudness promedio: ${loudnessAvg.toFixed(1)} dB
-- Complejidad dinámica: ${dynamic.toFixed(2)} (0=plano, 1=muy dinámico)
+        let focusBlock = '';
+        if (hasFocus) {
+            const s = Number(focusRegion.start).toFixed(1);
+            const e = Number(focusRegion.end).toFixed(1);
+            focusBlock = `FOCO: el pianista marcó el fragmento ${s}s→${e}s. Enfocá la respuesta ahí.\n\n`;
+        }
 
-ANÁLISIS PREVIO:
-- Puntuación: ${safeAi.overallScore ?? 'N/A'}/10
-- Análisis: ${musicalAnalysis}
-${exerciseTitle ? `- Ejercicio recomendado: ${exerciseTitle}\n` : ''}${nextGoal ? `- Objetivo próxima sesión: ${nextGoal}\n` : ''}
-${historyBlock}
-PREGUNTA ACTUAL DEL ESTUDIANTE:
-${question}`;
+        const durationText = Number(audioAnalysis?.duration || 0).toFixed(1);
+
+        // Reparto por registro pianístico — usá los midiNotes disponibles.
+        // Se computa acá (no pedimos que el caller lo pase) porque es chico y
+        // no todos los callers computan deriveFeatures antes del chat. Aplica a
+        // MIDI directo Y a audio→MIDI (basic-pitch).
+        const midiNotesForRoles = Array.isArray(audioAnalysis?.midiNotes) ? audioAnalysis.midiNotes : [];
+        let handRolesBlock = '';
+        if (midiNotesForRoles.length) {
+            const hr = handRoleZones(midiNotesForRoles, Number(audioAnalysis?.duration || 0));
+            if (hr && hr.totalNotes > 0) {
+                const pct = (v) => `${Math.round(v * 100)}%`;
+                handRolesBlock = `REPARTO_MANOS: bajo/comping (grave hasta Ab3)=${pct(hr.bass.share)} sim=${pct(hr.bass.simultaneity)} · mixto (A3-A4)=${pct(hr.transition.share)} · melodía (agudo desde Bb4)=${pct(hr.melody.share)} sim=${pct(hr.melody.simultaneity)}\n`;
+            }
+        }
+
+        // Núcleo siempre-in — chico, estable, cachea bien.
+        const coreBlock = `CONTEXTO (uso interno — REGLA 0):
+dur=${durationText}s · pulso=${tempoConfBand} · tonalidad=${keyStrengthBand} · dinámica=${dynBand} · timbre=${timbreBand}
+${handRolesBlock}${declaredBlock}${strengthsBlock}${primaryFocus ? `PRIMARY_FOCUS: ${primaryFocus}\n` : ''}${nextGoal ? `NEXT_GOAL: ${nextGoal}\n` : ''}${beliefVsDetection ? `BELIEF_VS_DETECTION: ${beliefVsDetection}\n` : ''}MUSICAL_ANALYSIS: ${musicalAnalysis || '(no disponible)'}
+`;
+
+        // Bloques opcionales ordenados por prioridad de trim (los últimos se
+        // tiran primero si nos pasamos del ceiling). Focus notes son las más
+        // caras pero también las de mayor valor cuando hay región marcada, así
+        // que van primero (no se tiran salvo que también sobre core).
+        const optionalBlocks = {
+            focusNotes:     focusNotesBlock,
+            observations:   observationsBlock,
+            moments:        momentsBlock,
+            exercise:       exerciseBlock,
+            reliability:    reliabilityBlock ? reliabilityBlock + '\n' : '',
+            memory:         memoryBlock ? memoryBlock + '\n' : '',
+            styleGuidance:  styleGuidance ? styleGuidance + '\n' : '',
+            history:        historyBlock,
+        };
+        // Orden de descarte (los últimos son los MÁS descartables).
+        const trimOrder = ['history', 'styleGuidance', 'memory', 'reliability', 'exercise', 'moments', 'observations', 'focusNotes'];
+
+        const composeUserPrompt = () => {
+            const parts = [focusBlock, coreBlock];
+            for (const key of trimOrder.slice().reverse()) {
+                if (optionalBlocks[key]) parts.push(optionalBlocks[key]);
+            }
+            parts.push(`\nPREGUNTA:\n${question}`);
+            return parts.filter(Boolean).join('\n');
+        };
+
+        let userPrompt = composeUserPrompt();
+        // Guard: si nos pasamos del ceiling, vamos descartando bloques por orden
+        // (empezando por history, terminando por focusNotes). Si aun así se pasa,
+        // recortamos musical_analysis a 150 chars y history a 100.
+        const ceiling = AIAnalysisEngine.CHAT_PROMPT_TOKEN_CEILING;
+        for (const key of trimOrder) {
+            if (AIAnalysisEngine._estimateTokens(userPrompt) <= ceiling) break;
+            if (optionalBlocks[key]) {
+                optionalBlocks[key] = '';
+                userPrompt = composeUserPrompt();
+            }
+        }
+        // Ultimísimo recurso: acortar el core (musical_analysis).
+        if (AIAnalysisEngine._estimateTokens(userPrompt) > ceiling && musicalAnalysis.length > 150) {
+            userPrompt = userPrompt.replace(
+                `MUSICAL_ANALYSIS: ${musicalAnalysis}`,
+                `MUSICAL_ANALYSIS: ${musicalAnalysis.slice(0, 150)}`,
+            );
+        }
 
         return { systemPrompt, userPrompt };
     }

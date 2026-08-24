@@ -74,6 +74,9 @@ export const uiMixin = {
         document.getElementById('audio-device').addEventListener('change', (e) => this.selectAudioDevice(e.target.value));
         document.getElementById('mic-toggle-btn')?.addEventListener('click', () => this.toggleMic());
 
+        // Fuente Audio | MIDI y detección de teclado MIDI.
+        this._initInputSourceUi?.();
+
         // Backing track
         document.getElementById('backing-track-file').addEventListener('change', (e) => this.loadBackingTrack(e));
         document.getElementById('play-backing').addEventListener('click', () => this.playBackingTrack());
@@ -492,7 +495,7 @@ export const uiMixin = {
         if (sectionName === 'ai-analysis') {
             this.loadRecordingsFromServer().finally(() => this.loadRecordingsForAnalysis());
             this._initGeminiToggle?.();
-            this._initProviderToggle?.();
+            this._initProviderChips?.();
         }
     },
 

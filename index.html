@@ -187,8 +187,21 @@
                         <p>Graba tus sesiones de práctica seleccionando tu micrófono. Puedes reproducir y eliminar grabaciones anteriores.</p>
                     </div>
                     
+                    <!-- Input Source Selector -->
+                    <div class="input-source-selector">
+                        <span class="input-source-label">Fuente de grabación:</span>
+                        <label class="input-source-option">
+                            <input type="radio" name="input-source" value="audio" checked>
+                            <span><i class="fas fa-microphone"></i> Audio (micrófono)</span>
+                        </label>
+                        <label class="input-source-option">
+                            <input type="radio" name="input-source" value="midi">
+                            <span><i class="fas fa-keyboard"></i> MIDI (teclado)</span>
+                        </label>
+                    </div>
+
                     <!-- Device Selector -->
-                    <div class="device-selector">
+                    <div class="device-selector" id="audio-device-row">
                         <label for="audio-device">Dispositivo de Audio:</label>
                         <select id="audio-device">
                             <option value="">Seleccionar dispositivo...</option>
@@ -199,6 +212,18 @@
                         <button id="mic-toggle-btn" class="btn-small mic-toggle" type="button" aria-pressed="false" title="Activar/desactivar micrófono">
                             <i class="fas fa-microphone-slash"></i> Activar micrófono
                         </button>
+                    </div>
+
+                    <!-- MIDI Device Selector (visible solo si fuente = MIDI) -->
+                    <div class="device-selector" id="midi-device-row" hidden>
+                        <label for="midi-device">Teclado MIDI:</label>
+                        <select id="midi-device">
+                            <option value="">Ningún teclado detectado</option>
+                        </select>
+                        <button id="midi-refresh-btn" class="btn-small" type="button">
+                            <i class="fas fa-sync"></i> Detectar
+                        </button>
+                        <span id="midi-status" class="midi-status">Sin conectar</span>
                     </div>
 
                     <!-- Recording Controls -->
@@ -621,14 +646,25 @@
                                     <span class="analysis-toggle__hint">testing A/B — apagalo para comparar el feedback sin la segunda capa auditiva</span>
                                 </label>
 
-                                <label class="analysis-toggle" for="analysis-provider-toggle" title="Cuando está encendido, Gemini genera también el texto pedagógico del análisis (por defecto lo hace Groq).">
-                                    <input type="checkbox" id="analysis-provider-toggle" />
-                                    <span class="analysis-toggle__label">
-                                        <i class="fas fa-comment-dots"></i>
-                                        Análisis con Gemini
+                                <div class="analysis-provider" role="radiogroup" aria-label="Motor de IA para el análisis">
+                                    <span class="analysis-provider__label">
+                                        <i class="fas fa-microchip"></i>
+                                        Motor de IA
                                     </span>
-                                    <span class="analysis-toggle__hint">experimental — cambia el motor que redacta la retroalimentación. Consume el mismo cupo diario de Gemini que la escucha profunda.</span>
-                                </label>
+                                    <div class="analysis-provider__chips" id="analysis-provider-chips">
+                                        <button type="button" class="provider-chip" data-provider="gemini" role="radio" aria-checked="true">
+                                            <i class="fas fa-star"></i> Gemini
+                                        </button>
+                                        <button type="button" class="provider-chip" data-provider="groq" role="radio" aria-checked="false">
+                                            <i class="fas fa-bolt"></i> Groq
+                                        </button>
+                                        <button type="button" class="provider-chip" data-provider="openrouter" role="radio" aria-checked="false">
+                                            <i class="fas fa-globe"></i> OpenRouter
+                                        </button>
+                                    </div>
+                                    <span class="analysis-provider__hint">quién sintetiza el feedback. Si el elegido falla, cae en cascada a los otros dos.</span>
+                                </div>
+
                             </div>
                         </details>
 
@@ -646,169 +682,301 @@
                         </div>
                     </div>
 
-                    <!-- Resultados del análisis -->
+                    <!-- Resultados del análisis
+                         Reordenados como un recorrido de sesión guiada:
+                         01 Tu percepción → 02 Lo que encontramos → 03 Hallazgo →
+                         04 Reflexión → 05 Probemos algo → 06 Observaciones (opc.) →
+                         07 Próximo paso. Los IDs internos (analysis-primary-focus-text,
+                         musical-analysis, analysis-wavesurfer, etc.) se mantienen
+                         intactos para no romper los renderers de app-audio-flow.js. -->
                     <div id="analysis-results" class="analysis-results hidden">
                         <div id="analysis-source-badge" class="analysis-source-badge"></div>
                         <details id="analysis-engines-details" class="analysis-engines-details">
                             <summary></summary>
                             <div class="engines-panel-body"></div>
                         </details>
-                        <!-- Hero: reproductor con marcas arriba -->
-                        <div class="analysis-section analysis-hero" data-section="player">
-                            <h3><i class="fas fa-wave-square"></i> Reproductor con marcas</h3>
-                            <p class="analysis-hint">Cada región marca un momento que identificó la IA. Verde = bien; naranja = a mejorar; gris = neutral. Click en una región para saltar ahí.</p>
-                            <div id="analysis-wavesurfer" class="analysis-wavesurfer"></div>
-                            <div id="analysis-wavesurfer-timeline" class="analysis-wavesurfer-timeline"></div>
-                            <div class="analysis-transport">
-                                <button id="analysis-play-btn" class="btn-secondary">
-                                    <i class="fas fa-play"></i>
-                                    <span data-role="analysis-play-label">Play</span>
-                                </button>
-                                <span id="analysis-time-label" class="analysis-time-label">0:00.00 / 0:00.00</span>
-                                <span id="analysis-moment-note" class="analysis-moment-note"></span>
-                            </div>
-                            <div class="waveform-legend">
-                                <span class="legend-item"><span class="legend-color good"></span> Bien</span>
-                                <span class="legend-item"><span class="legend-color improve"></span> A mejorar</span>
-                                <span class="legend-item"><span class="legend-color neutral"></span> Neutral</span>
-                            </div>
+
+                        <!-- Info de sesión (arriba, ligero) -->
+                        <div class="analysis-session-header">
+                            <span class="session-meta__item">
+                                <i class="fas fa-stopwatch" aria-hidden="true"></i>
+                                Duración: <strong id="recording-duration">--</strong>
+                            </span>
                         </div>
 
-                        <div class="analysis-grid">
-                            <!-- Columna izquierda: datos duros -->
-                            <div class="analysis-grid__col analysis-grid__col--data">
-                                <div class="analysis-section" data-section="summary">
-                                    <h3><i class="fas fa-chart-line"></i> Resumen General</h3>
-                                    <div class="summary-cards">
-                                        <div class="summary-card" data-metric="tempo">
-                                            <div class="card-icon"><i class="fas fa-heart-pulse"></i></div>
-                                            <div class="card-content">
-                                                <div class="card-label">Tempo Detectado</div>
-                                                <div class="card-value" id="detected-tempo">-- BPM</div>
-                                            </div>
-                                        </div>
-                                        <div class="summary-card" data-metric="key">
-                                            <div class="card-icon"><i class="fas fa-music"></i></div>
-                                            <div class="card-content">
-                                                <div class="card-label">Tonalidad</div>
-                                                <div class="card-value" id="detected-key">--</div>
-                                            </div>
-                                        </div>
-                                        <div class="summary-card" data-metric="score">
-                                            <div class="card-icon"><i class="fas fa-star"></i></div>
-                                            <div class="card-content">
-                                                <div class="card-label">Puntuación</div>
-                                                <div class="card-value" id="overall-score">--/10</div>
-                                            </div>
-                                        </div>
-                                        <div class="summary-card" data-metric="duration">
-                                            <div class="card-icon"><i class="fas fa-stopwatch"></i></div>
-                                            <div class="card-content">
-                                                <div class="card-label">Duración</div>
-                                                <div class="card-value" id="recording-duration">--</div>
-                                            </div>
-                                        </div>
+                        <div class="analysis-flow">
+                            <!-- 01 · TU PERCEPCIÓN
+                                 Se rellena desde currentAnalysis.selfEvaluation (rating,
+                                 weakArea, prediction). Si el pianista saltó el modal,
+                                 la sección queda oculta. Ver _renderPerception. -->
+                            <section class="flow-step hidden" id="analysis-perception-section" data-step="1">
+                                <header class="flow-step__header">
+                                    <span class="flow-step__number" aria-hidden="true">01</span>
+                                    <div class="flow-step__titles">
+                                        <p class="flow-step__eyebrow">Antes de ver el análisis</p>
+                                        <h3 class="flow-step__title">Tu percepción</h3>
                                     </div>
+                                </header>
+                                <div class="flow-step__body">
+                                    <div id="analysis-perception-content" class="analysis-perception__content"></div>
+                                    <p class="analysis-perception__caption">Tu percepción es nuestro punto de partida.</p>
                                 </div>
+                            </section>
 
-                                <div class="analysis-section technical-metrics-section" data-section="metrics">
-                                    <h3><i class="fas fa-sliders"></i> Métricas detectadas</h3>
-                                    <div class="technical-metrics-grid">
-                                        <div class="technical-card">
-                                            <div class="technical-label">BPM real</div>
-                                            <div class="technical-value" id="metric-bpm-value">-- BPM</div>
-                                            <div class="confidence-bar"><span id="metric-bpm-confidence"></span></div>
-                                            <div class="technical-hint" id="metric-bpm-confidence-text">Confianza --%</div>
-                                        </div>
-                                        <div class="technical-card">
-                                            <div class="technical-label">Tonalidad detectada</div>
-                                            <div class="technical-value" id="metric-key-value">--</div>
-                                            <div class="confidence-bar"><span id="metric-key-strength"></span></div>
-                                            <div class="technical-hint" id="metric-key-strength-text">Fuerza --%</div>
-                                        </div>
-                                        <div class="technical-card">
-                                            <div class="technical-label">Complejidad dinámica</div>
-                                            <div class="dynamic-gauge">
-                                                <span id="metric-dynamic-gauge"></span>
-                                            </div>
-                                            <div class="technical-hint" id="metric-dynamic-text">--</div>
-                                        </div>
+                            <!-- 02 · LO QUE ENCONTRAMOS
+                                 Waveform con regiones + análisis musical en prosa +
+                                 (si vino) "Tu oído vs los datos". Todo junto para que
+                                 el pianista vea "dónde ocurrió" y "qué se escucha". -->
+                            <section class="flow-step flow-step--wide" data-step="2">
+                                <header class="flow-step__header">
+                                    <span class="flow-step__number" aria-hidden="true">02</span>
+                                    <div class="flow-step__titles">
+                                        <p class="flow-step__eyebrow">Dónde ocurrió y qué se escucha</p>
+                                        <h3 class="flow-step__title">Lo que encontramos</h3>
                                     </div>
+                                </header>
+                                <div class="flow-step__body">
+                                    <p class="analysis-hint">Cada región marca un momento que identificó la IA. Verde = bien; naranja = a mejorar; gris = neutral. Click en una región para saltar ahí. <strong>Arrastrá sobre la onda</strong> para marcar tu propio fragmento (azul) y preguntarle a NeuralJam por ese pasaje.</p>
+                                    <div id="analysis-wavesurfer" class="analysis-wavesurfer"></div>
+                                    <div id="analysis-wavesurfer-timeline" class="analysis-wavesurfer-timeline"></div>
+                                    <div class="analysis-transport">
+                                        <button id="analysis-play-btn" class="btn-secondary">
+                                            <i class="fas fa-play"></i>
+                                            <span data-role="analysis-play-label">Play</span>
+                                        </button>
+                                        <button id="analysis-play-region-btn" class="btn-secondary" hidden>
+                                            <i class="fas fa-repeat"></i> Loop fragmento
+                                        </button>
+                                        <button id="analysis-clear-region-btn" class="btn-secondary" hidden>
+                                            <i class="fas fa-xmark"></i> Limpiar
+                                        </button>
+                                        <span id="analysis-time-label" class="analysis-time-label">0:00.00 / 0:00.00</span>
+                                        <span id="analysis-moment-note" class="analysis-moment-note"></span>
+                                    </div>
+                                    <div class="waveform-legend">
+                                        <span class="legend-item"><span class="legend-color good"></span> Bien</span>
+                                        <span class="legend-item"><span class="legend-color improve"></span> A mejorar</span>
+                                        <span class="legend-item"><span class="legend-color neutral"></span> Neutral</span>
+                                        <span class="legend-item"><span class="legend-color user"></span> Tu selección</span>
+                                    </div>
+
+                                    <!-- Análisis musical en prosa (rellenado por displayAnalysisResults) -->
+                                    <div class="analysis-content flow-step__prose" id="musical-analysis"></div>
+
+                                    <!-- Puente entre percepción y análisis: comparación oído vs datos.
+                                         Visible solo si vino selfEval Y el modelo llenó beliefVsDetection. -->
+                                    <div class="analysis-belief-section hidden" id="analysis-belief-section">
+                                        <span class="analysis-belief__label"><i class="fas fa-ear-listen"></i> Tu oído vs los datos</span>
+                                        <p class="analysis-belief__text" id="analysis-belief-text"></p>
+                                    </div>
+
+                                    <!-- MIDI notes (Basic Pitch): quedan ocultas por defecto vía JS -->
                                     <div id="midi-notes-container" class="midi-notes-container hidden">
                                         <h4>Notas detectadas (Basic Pitch)</h4>
                                         <div id="midi-notes-list" class="midi-notes-list"></div>
                                     </div>
                                 </div>
-                            </div>
+                            </section>
 
-                            <!-- Columna derecha: feedback pedagógico -->
-                            <div class="analysis-grid__col analysis-grid__col--feedback">
-                                <div class="analysis-section analysis-primary-focus hidden" id="analysis-primary-focus-section" data-section="focus">
-                                    <h3><i class="fas fa-bullseye"></i> Tu principal foco</h3>
-                                    <p class="analysis-primary-focus__text" id="analysis-primary-focus-text"></p>
+                            <!-- 03 · HALLAZGO PRINCIPAL
+                                 Es el foco de la sesión. Grande, con "Lo que estás
+                                 haciendo bien" como bloque secundario debajo. -->
+                            <section class="flow-step flow-step--focus" data-step="3">
+                                <header class="flow-step__header">
+                                    <span class="flow-step__number" aria-hidden="true">03</span>
+                                    <div class="flow-step__titles">
+                                        <p class="flow-step__eyebrow">Qué vale la pena trabajar ahora</p>
+                                        <h3 class="flow-step__title">Hallazgo principal</h3>
+                                    </div>
+                                </header>
+                                <div class="flow-step__body">
+                                    <div class="analysis-primary-focus hidden" id="analysis-primary-focus-section">
+                                        <p class="analysis-primary-focus__text" id="analysis-primary-focus-text"></p>
+                                    </div>
+                                    <div class="analysis-strengths-block hidden" id="analysis-strengths-section">
+                                        <span class="analysis-strengths__label"><i class="fas fa-circle-check"></i> Lo que estás haciendo bien</span>
+                                        <ul id="analysis-strengths-list" class="analysis-strengths-list"></ul>
+                                    </div>
                                 </div>
+                            </section>
 
-                                <div class="analysis-section" data-section="musical">
-                                    <h3><i class="fas fa-wave-square"></i> Análisis musical</h3>
-                                    <div class="analysis-content" id="musical-analysis"></div>
-                                </div>
-
-                                <div class="analysis-section analysis-strengths-section hidden" id="analysis-strengths-section" data-section="strengths">
-                                    <h3><i class="fas fa-circle-check"></i> Lo que estás haciendo bien</h3>
-                                    <ul id="analysis-strengths-list" class="analysis-strengths-list"></ul>
-                                </div>
-
-                                <div class="analysis-section analysis-belief-section hidden" id="analysis-belief-section" data-section="belief">
-                                    <h3><i class="fas fa-ear-listen"></i> Tu oído vs los datos</h3>
-                                    <p class="analysis-belief__text" id="analysis-belief-text"></p>
-                                </div>
-
-                                <div class="analysis-section analysis-observations-section hidden" id="analysis-observations-section" data-section="observations">
-                                    <h3><i class="fas fa-magnifying-glass-chart"></i> Observaciones estructuradas</h3>
-                                    <p class="analysis-observations-hint">Cada observación va en tres niveles: qué muestran los datos, qué sugieren musicalmente y qué podés experimentar para verificarlo.</p>
-                                    <div id="analysis-observations-list" class="analysis-observations-list"></div>
-                                </div>
-
-                                <div class="analysis-section" data-section="exercise">
-                                    <h3><i class="fas fa-dumbbell"></i> Ejercicio de esta semana</h3>
-                                    <div class="practice-suggestions" id="practice-suggestions"></div>
-                                </div>
-
-                                <div class="analysis-section analysis-next-goal hidden" id="analysis-next-goal-section" data-section="goal">
-                                    <h3><i class="fas fa-flag-checkered"></i> Objetivo próxima sesión</h3>
-                                    <p class="analysis-next-goal__text" id="analysis-next-goal-text"></p>
-                                </div>
-
-                                <div class="analysis-section analysis-metaq-section hidden" id="analysis-metaq-section">
+                            <!-- 04 · REFLEXIÓN
+                                 Pregunta metacognitiva antes del experimento. Sin
+                                 título "sección" — solo la pregunta grande. Oculta
+                                 si el modelo no llenó metacognitiveQuestion. -->
+                            <section class="flow-step flow-step--reflect analysis-metaq-section hidden" id="analysis-metaq-section" data-step="4">
+                                <header class="flow-step__header">
+                                    <span class="flow-step__number" aria-hidden="true">04</span>
+                                    <div class="flow-step__titles">
+                                        <p class="flow-step__eyebrow">Antes de probar algo</p>
+                                        <h3 class="flow-step__title">Reflexión</h3>
+                                    </div>
+                                </header>
+                                <div class="flow-step__body">
                                     <p class="analysis-metaq__text" id="analysis-metaq-text"></p>
                                 </div>
-                            </div>
-                        </div>
+                            </section>
 
-                        <div class="analysis-section">
-                            <h3><span class="neuraljam-orb" aria-hidden="true"></span> Pregúntale a NeuralJam</h3>
-                            <div class="analysis-chat">
-                                <div id="analysis-chat-messages" class="chat-messages"></div>
-                                <div class="chat-input-row">
-                                    <textarea id="analysis-chat-input" rows="2" placeholder="Ej: ¿En qué partes me fui de tempo y cómo lo practico?"></textarea>
-                                    <button id="analysis-chat-send" class="btn-primary">
-                                        <i class="fas fa-paper-plane"></i> Enviar
-                                    </button>
+                            <!-- 05 · PROBEMOS ALGO -->
+                            <section class="flow-step" data-step="5">
+                                <header class="flow-step__header">
+                                    <span class="flow-step__number" aria-hidden="true">05</span>
+                                    <div class="flow-step__titles">
+                                        <p class="flow-step__eyebrow">Experimento de práctica</p>
+                                        <h3 class="flow-step__title">Probemos algo</h3>
+                                    </div>
+                                </header>
+                                <div class="flow-step__body">
+                                    <div class="practice-suggestions" id="practice-suggestions"></div>
                                 </div>
-                                <p class="chat-hint">Privacidad: no se envía tu audio. Solo métricas numéricas y tu pregunta.</p>
-                            </div>
+                            </section>
+
+                            <!-- 06 · DESPUÉS DE PRACTICAR
+                                 Cierra el ciclo del experimento: el pianista vuelve
+                                 a probar el fragmento y anota qué cambió.
+                                 Dos bloques internos:
+                                   · Zona de grabación de toma B (opcional; si graba,
+                                     habilita el paso 07 de comparación A/B).
+                                   · Formulario "¿qué notaste? / ¿qué funcionó?"
+                                     con persistencia en localStorage. -->
+                            <section class="flow-step" id="analysis-afterpractice-section" data-step="6">
+                                <header class="flow-step__header">
+                                    <span class="flow-step__number" aria-hidden="true">06</span>
+                                    <div class="flow-step__titles">
+                                        <p class="flow-step__eyebrow">Después del experimento</p>
+                                        <h3 class="flow-step__title">Después de practicar</h3>
+                                    </div>
+                                </header>
+                                <div class="flow-step__body">
+                                    <!-- Zona de grabación de toma B. Renderizada por
+                                         _renderAfterPracticeRecording. Muestra CTA
+                                         cuando no hay toma; timer cuando graba;
+                                         estado "toma guardada" cuando existe. -->
+                                    <div id="analysis-afterpractice-recorder" class="afterpractice-recorder"></div>
+
+                                    <!-- Formulario de "¿qué notaste? / ¿qué funcionó?" (Fase 2) -->
+                                    <div id="analysis-afterpractice-content" class="afterpractice"></div>
+                                </div>
+                            </section>
+
+                            <!-- 07 · ANTES vs DESPUÉS (Fase 3)
+                                 Comparación A/B de la grabación original con la
+                                 toma B recién hecha. La sección entera queda
+                                 oculta hasta que hay una toma B en IndexedDB
+                                 (ver AfterPracticeStore). Sin métricas
+                                 comparativas: la evaluación la hace el oído. -->
+                            <section class="flow-step hidden" id="analysis-ab-section" data-step="7">
+                                <header class="flow-step__header">
+                                    <span class="flow-step__number" aria-hidden="true">07</span>
+                                    <div class="flow-step__titles">
+                                        <p class="flow-step__eyebrow">Comparación con tu oído</p>
+                                        <h3 class="flow-step__title">Antes vs después</h3>
+                                    </div>
+                                </header>
+                                <div class="flow-step__body">
+                                    <div class="ab-compare">
+                                        <div class="ab-take" data-take="a">
+                                            <div class="ab-take__header">
+                                                <span class="ab-take__label">Antes</span>
+                                                <span class="ab-take__caption">Grabación original del análisis</span>
+                                                <button type="button" class="ab-take__play" data-action="ab-play-a" aria-label="Reproducir antes">
+                                                    <i class="fas fa-play"></i>
+                                                </button>
+                                            </div>
+                                            <div class="ab-take__wave" id="ab-wave-a"></div>
+                                        </div>
+                                        <div class="ab-take" data-take="b">
+                                            <div class="ab-take__header">
+                                                <span class="ab-take__label">Después</span>
+                                                <span class="ab-take__caption">Toma post-experimento</span>
+                                                <button type="button" class="ab-take__play" data-action="ab-play-b" aria-label="Reproducir después">
+                                                    <i class="fas fa-play"></i>
+                                                </button>
+                                            </div>
+                                            <div class="ab-take__wave" id="ab-wave-b"></div>
+                                        </div>
+                                        <div class="ab-compare__actions">
+                                            <button type="button" class="ab-compare__btn ab-compare__btn--primary" data-action="ab-alternate">
+                                                <i class="fas fa-arrow-right-arrow-left"></i> Escuchar A → B
+                                            </button>
+                                            <button type="button" class="ab-compare__btn ab-compare__btn--danger" data-action="ab-discard">
+                                                <i class="fas fa-trash"></i> Regrabar toma B
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </section>
+
+                            <!-- 08 · OBSERVACIONES DETALLADAS
+                                 Contenido secundario, colapsable. La sección entera
+                                 se oculta vía `.hidden` cuando no hay observations. -->
+                            <section class="flow-step flow-step--detail analysis-observations-section hidden" id="analysis-observations-section" data-step="8">
+                                <details class="flow-step__details">
+                                    <summary class="flow-step__header flow-step__header--summary">
+                                        <span class="flow-step__number" aria-hidden="true">08</span>
+                                        <div class="flow-step__titles">
+                                            <p class="flow-step__eyebrow">Si querés profundizar (opcional)</p>
+                                            <h3 class="flow-step__title">Observaciones detalladas</h3>
+                                        </div>
+                                        <i class="fas fa-chevron-down flow-step__chevron" aria-hidden="true"></i>
+                                    </summary>
+                                    <div class="flow-step__body">
+                                        <p class="analysis-observations-hint">Cada observación va en tres niveles: qué muestran los datos, qué sugieren musicalmente y qué podés experimentar para verificarlo.</p>
+                                        <div id="analysis-observations-list" class="analysis-observations-list"></div>
+                                    </div>
+                                </details>
+                            </section>
+
+                            <!-- 09 · PRÓXIMO PASO -->
+                            <section class="flow-step flow-step--next analysis-next-goal hidden" id="analysis-next-goal-section" data-step="9">
+                                <header class="flow-step__header">
+                                    <span class="flow-step__number" aria-hidden="true">09</span>
+                                    <div class="flow-step__titles">
+                                        <p class="flow-step__eyebrow">¿Qué hago ahora?</p>
+                                        <h3 class="flow-step__title">Próximo paso</h3>
+                                    </div>
+                                </header>
+                                <div class="flow-step__body">
+                                    <p class="analysis-next-goal__text" id="analysis-next-goal-text"></p>
+                                </div>
+                            </section>
                         </div>
 
-                        <div class="analysis-actions">
-                            <button id="save-analysis-btn" class="btn-primary">
-                                <i class="fas fa-save"></i> Guardar Análisis
-                            </button>
-                            <button id="new-analysis-btn" class="btn-secondary">
-                                <i class="fas fa-redo"></i> Analizar Otra Grabación
-                            </button>
-                            <button id="export-analysis-btn" class="btn-secondary">
-                                <i class="fas fa-download"></i> Exportar análisis (.txt)
-                            </button>
+                        <!-- Secciones secundarias — separadas del recorrido principal
+                             para que el chat y las acciones no compitan con la narrativa. -->
+                        <div class="analysis-secondary">
+                            <div class="analysis-secondary__block">
+                                <h3 class="analysis-secondary__title"><span class="neuraljam-orb" aria-hidden="true"></span> Pregúntale a NeuralJam</h3>
+                                <div class="analysis-chat">
+                                    <div id="analysis-chat-messages" class="chat-messages"></div>
+                                    <div id="analysis-chat-focus-chip" class="analysis-chat-focus-chip" hidden>
+                                        <i class="fas fa-crosshairs"></i>
+                                        <span>Preguntando sobre el fragmento <strong data-role="focus-range">0:00 – 0:00</strong></span>
+                                        <button type="button" class="focus-chip-clear" aria-label="Quitar fragmento">
+                                            <i class="fas fa-xmark"></i>
+                                        </button>
+                                    </div>
+                                    <div class="chat-input-row">
+                                        <textarea id="analysis-chat-input" rows="2" placeholder="Ej: ¿En qué partes me fui de tempo y cómo lo practico?"></textarea>
+                                        <button id="analysis-chat-send" class="btn-primary">
+                                            <i class="fas fa-paper-plane"></i> Enviar
+                                        </button>
+                                    </div>
+                                    <p class="chat-hint">Privacidad: no se envía tu audio. Solo métricas numéricas y tu pregunta.</p>
+                                </div>
+                            </div>
+
+                            <div class="analysis-actions">
+                                <button id="save-analysis-btn" class="btn-primary">
+                                    <i class="fas fa-save"></i> Guardar Análisis
+                                </button>
+                                <button id="new-analysis-btn" class="btn-secondary">
+                                    <i class="fas fa-redo"></i> Analizar Otra Grabación
+                                </button>
+                                <button id="export-analysis-btn" class="btn-secondary">
+                                    <i class="fas fa-download"></i> Exportar análisis (.txt)
+                                </button>
+                            </div>
                         </div>
                     </div>
 

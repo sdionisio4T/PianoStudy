@@ -9,6 +9,10 @@ import { clipSegments } from '../modules/GeminiAudioClipper.js';
 import { analyzeAudioClips } from '../modules/GeminiAudioAnalyzer.js';
 import { GEMINI_AUDIO_CONFIG } from '../modules/GeminiAudioConfig.js';
 import { assessAnalysis } from '../modules/AnalysisReliability.js';
+import { MidiRecorder, midiBlobToAnalysis } from '../modules/MidiRecorder.js';
+import { MidiPianoRoll } from '../modules/MidiPianoRoll.js';
+import { streamChat } from '../modules/streamingClient.js';
+import { saveTake as saveAfterPracticeTake, getTake as getAfterPracticeTake, deleteTake as deleteAfterPracticeTake } from '../modules/AfterPracticeStore.js';
 import {
     insertLick, updateLick, uploadLickAudio,
     loadRecordingsFromDB, uploadRecording, getRecordingPublicUrl, deleteRecording,
@@ -49,7 +53,7 @@ export const audioFlowMixin = {
         await this.loadRecordingsFromServer();
         this.loadRecordingsForAnalysis();
         this._initGeminiToggle();
-        this._initProviderToggle();
+        this._initProviderChips();
     },
 
     // Toggle "Escucha profunda (Gemini)". Persistido por usuario. Default ON
@@ -72,30 +76,6 @@ export const audioFlowMixin = {
         }
     },
 
-    // Toggle "Análisis con Gemini" — decide qué proveedor genera el texto
-    // pedagógico. Default OFF (Groq). Persistido en la key global que lee
-    // AIAnalysisEngine._getProvider() ('pianoStudy.aiProvider').
-    // Es global (no por usuario) porque el flag es experimental / A/B corto.
-    _initProviderToggle() {
-        const toggle = document.getElementById('analysis-provider-toggle');
-        if (!toggle) return;
-        let stored = null;
-        try { stored = localStorage.getItem('pianoStudy.aiProvider'); } catch { /* ignore */ }
-        toggle.checked = stored === 'gemini';
-        if (!toggle._providerWired) {
-            toggle._providerWired = true;
-            toggle.addEventListener('change', () => {
-                try {
-                    if (toggle.checked) {
-                        localStorage.setItem('pianoStudy.aiProvider', 'gemini');
-                    } else {
-                        localStorage.removeItem('pianoStudy.aiProvider');
-                    }
-                } catch { /* ignore */ }
-            });
-        }
-    },
-
     _isGeminiAudioEnabled() {
         const toggle = document.getElementById('analysis-gemini-toggle');
         if (toggle) return !!toggle.checked;
@@ -103,6 +83,48 @@ export const audioFlowMixin = {
             this.userKey('pianostudy-gemini-audio-enabled'), true,
         );
         return stored !== false;
+    },
+
+    // Chip selector "Motor de IA" — persiste el proveedor elegido en
+    // localStorage con la MISMA clave que AIAnalysisEngine._getProvider lee
+    // (`pianoStudy.provider.analysis` y `.chat`). Un solo selector controla
+    // ambos roles por simplicidad — si algún día se quiere separarlos, se
+    // agrega un segundo chip group con `data-role="chat"`.
+    _initProviderChips() {
+        const container = document.getElementById('analysis-provider-chips');
+        if (!container || container._providerWired) return;
+        container._providerWired = true;
+
+        const validProviders = new Set(['gemini', 'groq', 'openrouter']);
+        const readCurrent = () => {
+            try {
+                const v = localStorage.getItem('pianoStudy.provider.analysis');
+                return validProviders.has(v) ? v : 'gemini';
+            } catch { return 'gemini'; }
+        };
+        const writeCurrent = (provider) => {
+            try {
+                localStorage.setItem('pianoStudy.provider.analysis', provider);
+                localStorage.setItem('pianoStudy.provider.chat', provider);
+            } catch { /* modo privado / SSR — persistencia se pierde, la selección visual queda igual */ }
+        };
+        const paint = (active) => {
+            container.querySelectorAll('.provider-chip').forEach(btn => {
+                const isActive = btn.dataset.provider === active;
+                btn.setAttribute('aria-checked', isActive ? 'true' : 'false');
+            });
+        };
+
+        paint(readCurrent());
+
+        container.addEventListener('click', (e) => {
+            const btn = e.target.closest('.provider-chip');
+            if (!btn) return;
+            const provider = btn.dataset.provider;
+            if (!validProviders.has(provider)) return;
+            writeCurrent(provider);
+            paint(provider);
+        });
     },
 
     // "Lo que estás haciendo bien" — bullets simples con checkmark, máx 2.
@@ -127,6 +149,705 @@ export const audioFlowMixin = {
             </li>
         `).join('');
         section.classList.remove('hidden');
+    },
+
+    // Paso 01 del recorrido — Tu percepción.
+    // Refleja lo que el pianista respondió en el modal de autoevaluación
+    // (rating, área más floja, hipótesis) como primer bloque del flujo. Si
+    // el usuario saltó el modal, la sección queda oculta y el paso 02 pasa
+    // a ser el primero visible. Se lee de currentAnalysis.selfEvaluation
+    // (guardado en startAnalysis) y no vuelve a preguntar al usuario.
+    _renderPerception(selfEval) {
+        const section = document.getElementById('analysis-perception-section');
+        const content = document.getElementById('analysis-perception-content');
+        if (!section || !content) return;
+
+        const rating = Number(selfEval?.rating);
+        const weakArea = String(selfEval?.weakArea || '').trim();
+        const prediction = String(selfEval?.prediction || '').trim();
+        const hasRating = Number.isFinite(rating) && rating >= 1 && rating <= 5;
+
+        // Si el pianista saltó el modal, no vino nada: ocultamos la sección
+        // para que el paso 02 arranque el recorrido.
+        if (!hasRating && !weakArea && !prediction) {
+            section.classList.add('hidden');
+            content.innerHTML = '';
+            return;
+        }
+
+        const weakAreaLabels = {
+            timing: 'Timing',
+            dinamica: 'Dinámica',
+            notas: 'Notas',
+            fraseo: 'Fraseo',
+            otro: 'Otro',
+        };
+
+        const rows = [];
+
+        if (hasRating) {
+            const ratingScale = { 1: 'muy floja', 2: 'floja', 3: 'regular', 4: 'buena', 5: 'muy buena' };
+            const dots = Array.from({ length: 5 }, (_, i) =>
+                `<span class="perception-rating__dot ${i < rating ? 'is-on' : ''}"></span>`
+            ).join('');
+            rows.push(`
+                <div class="perception-row">
+                    <span class="perception-label">Cómo la sentiste</span>
+                    <span class="perception-rating">
+                        <span class="perception-rating__dots" aria-hidden="true">${dots}</span>
+                        <span>${rating}/5 · ${ratingScale[rating]}</span>
+                    </span>
+                </div>
+            `);
+        }
+
+        if (weakArea) {
+            const label = weakAreaLabels[weakArea] || weakArea;
+            rows.push(`
+                <div class="perception-row">
+                    <span class="perception-label">Dónde sentiste el problema</span>
+                    <span class="perception-chip">${escapeHtml(label)}</span>
+                </div>
+            `);
+        }
+
+        if (prediction) {
+            rows.push(`
+                <div class="perception-row">
+                    <span class="perception-label">Tu hipótesis</span>
+                </div>
+                <blockquote class="perception-prediction">${escapeHtml(prediction)}</blockquote>
+            `);
+        }
+
+        content.innerHTML = rows.join('');
+        section.classList.remove('hidden');
+    },
+
+    // Paso 06 del recorrido — Después de practicar.
+    // Cierra el ciclo experimento → escuchar → evaluar. Persistencia local
+    // por análisis; en Fase 2 no toca backend ni Supabase. La key incluye
+    // recordingId + timestamp del análisis para no colisionar entre tomas
+    // de la misma grabación, y sobrevive a recargar la página o volver al
+    // análisis desde el historial (currentAnalysis conserva ambos campos).
+    _afterPracticeKey(analysis) {
+        const rid = String(analysis?.recordingId || 'unknown');
+        const ts = Number(analysis?.timestamp || 0);
+        return `pianostudy.afterpractice.${rid}.${ts}`;
+    },
+
+    _loadAfterPractice(analysis) {
+        try {
+            const raw = localStorage.getItem(this._afterPracticeKey(analysis));
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== 'object') return null;
+            return parsed;
+        } catch (err) {
+            console.warn('[afterpractice] load falló:', err);
+            return null;
+        }
+    },
+
+    _saveAfterPractice(analysis, data) {
+        try {
+            localStorage.setItem(this._afterPracticeKey(analysis), JSON.stringify(data));
+        } catch (err) {
+            console.warn('[afterpractice] save falló:', err);
+        }
+    },
+
+    // Etiquetas legibles de las 4 opciones de "¿qué notaste?".
+    // Los slugs son los que se guardan; las labels se derivan al render.
+    _afterPracticeNoticedLabels: {
+        improved: 'Mejoró',
+        same: 'Igual',
+        changed_other: 'Cambió otra cosa',
+        no_diff: 'No noté diferencia',
+    },
+
+    _renderAfterPractice(analysis) {
+        const section = document.getElementById('analysis-afterpractice-section');
+        const content = document.getElementById('analysis-afterpractice-content');
+        if (!section || !content) return;
+
+        // Estado local (no persistente entre renders): lo que el pianista
+        // eligió/escribió en el formulario antes de darle guardar.
+        const draft = this._afterPracticeDraft || { noticed: null, worked: '' };
+        const saved = this._loadAfterPractice(analysis);
+        const editing = Boolean(this._afterPracticeEditing);
+        const showForm = editing || !saved;
+
+        if (!showForm && saved) {
+            const noticedLabel = this._afterPracticeNoticedLabels[saved.noticed] || '—';
+            const workedText = String(saved.worked || '').trim();
+            content.innerHTML = `
+                <div class="afterpractice__saved">
+                    <div class="afterpractice__saved-row">
+                        <span class="afterpractice__saved-label">Qué notaste</span>
+                        <span class="afterpractice__saved-value is-chip">${escapeHtml(noticedLabel)}</span>
+                    </div>
+                    ${workedText ? `
+                        <div class="afterpractice__saved-row">
+                            <span class="afterpractice__saved-label">Qué funcionó</span>
+                            <span class="afterpractice__saved-value">${escapeHtml(workedText)}</span>
+                        </div>
+                    ` : ''}
+                    <button type="button" class="afterpractice__edit" data-action="afterpractice-edit">
+                        <i class="fas fa-pen"></i> Editar respuesta
+                    </button>
+                </div>
+            `;
+        } else {
+            // Precarga del formulario con lo guardado (si estamos editando) o
+            // con el borrador temporal (si el pianista está en medio de escribir).
+            const seed = editing && saved ? saved : draft;
+            const noticed = seed.noticed || null;
+            const worked = String(seed.worked || '');
+
+            const optionsHtml = Object.entries(this._afterPracticeNoticedLabels)
+                .map(([slug, label]) => `
+                    <button type="button"
+                            class="afterpractice__option ${noticed === slug ? 'is-active' : ''}"
+                            data-action="afterpractice-option"
+                            data-value="${slug}">${escapeHtml(label)}</button>
+                `).join('');
+
+            content.innerHTML = `
+                <p class="afterpractice__intro">Cuando probaste el experimento, <strong>¿qué cambió?</strong></p>
+                <div class="afterpractice__field">
+                    <span class="afterpractice__label">¿Qué notaste?</span>
+                    <div class="afterpractice__options" role="radiogroup" aria-label="¿Qué notaste después del experimento?">
+                        ${optionsHtml}
+                    </div>
+                </div>
+                <div class="afterpractice__field">
+                    <label class="afterpractice__label" for="afterpractice-worked">¿Qué crees que funcionó?</label>
+                    <textarea id="afterpractice-worked"
+                              class="afterpractice__textarea"
+                              maxlength="400"
+                              placeholder="Ej: bajar el tempo al 70% me dejó escuchar el pulso interno"
+                              data-action="afterpractice-worked">${escapeHtml(worked)}</textarea>
+                </div>
+                <div class="afterpractice__actions">
+                    <button type="button" class="afterpractice__save" data-action="afterpractice-save" ${noticed ? '' : 'disabled'}>
+                        <i class="fas fa-check"></i> Guardar
+                    </button>
+                    ${saved ? `<button type="button" class="afterpractice__skip" data-action="afterpractice-cancel">Cancelar edición</button>` : ''}
+                </div>
+                <p class="afterpractice__hint">Se guarda solo en este dispositivo. Podés editarlo más tarde.</p>
+            `;
+        }
+
+        // Delegación de eventos: un único onclick por render (reemplazamos el
+        // innerHTML entero, así que no acumulamos handlers viejos).
+        content.onclick = (ev) => {
+            const target = ev.target.closest('[data-action]');
+            if (!target) return;
+            const action = target.getAttribute('data-action');
+            if (action === 'afterpractice-option') {
+                const value = target.getAttribute('data-value');
+                this._afterPracticeDraft = {
+                    ...(this._afterPracticeDraft || {}),
+                    noticed: value,
+                    worked: (content.querySelector('#afterpractice-worked')?.value || '').trim(),
+                };
+                this._renderAfterPractice(analysis);
+            } else if (action === 'afterpractice-save') {
+                const noticed = this._afterPracticeDraft?.noticed
+                    || (this._afterPracticeEditing ? this._loadAfterPractice(analysis)?.noticed : null);
+                if (!noticed) return;
+                const worked = (content.querySelector('#afterpractice-worked')?.value || '').trim();
+                this._saveAfterPractice(analysis, {
+                    noticed,
+                    worked,
+                    savedAt: Date.now(),
+                });
+                this._afterPracticeDraft = null;
+                this._afterPracticeEditing = false;
+                this._renderAfterPractice(analysis);
+            } else if (action === 'afterpractice-edit') {
+                this._afterPracticeEditing = true;
+                this._renderAfterPractice(analysis);
+            } else if (action === 'afterpractice-cancel') {
+                this._afterPracticeEditing = false;
+                this._afterPracticeDraft = null;
+                this._renderAfterPractice(analysis);
+            }
+        };
+
+        // Guardar el texto en el borrador conforme el pianista escribe, para
+        // que si toca una opción (que fuerza rerender) no pierda lo tipeado.
+        const ta = content.querySelector('#afterpractice-worked');
+        if (ta) {
+            ta.oninput = () => {
+                this._afterPracticeDraft = {
+                    ...(this._afterPracticeDraft || { noticed: null }),
+                    worked: ta.value,
+                };
+            };
+        }
+
+        section.classList.remove('hidden');
+    },
+
+    // ═════════════════════════════════════════════════════════════════════
+    // FASE 3 — Grabación de toma B + comparación A/B
+    //
+    // Zona de grabación dentro del paso 06 y comparación waveform-a-waveform
+    // en el paso 07. Persistencia en IndexedDB (ver AfterPracticeStore.js);
+    // solo se guarda una toma por análisis (regrabar reemplaza).
+    // ═════════════════════════════════════════════════════════════════════
+
+    _afterPracticeFormatTimer(ms) {
+        const total = Math.max(0, Math.floor(Number(ms) || 0) / 1000);
+        const m = Math.floor(total / 60);
+        const s = Math.floor(total % 60);
+        return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    },
+
+    // Estado del recorder de toma B. Vive en this._afterPracticeRec para
+    // que _afterPracticeStopRecording pueda accederlo desde el handler.
+    // Se resetea al cambiar de análisis en displayAnalysisResults.
+    _afterPracticeRec: null,
+    _afterPracticeMidiRec: null,
+
+    // ¿El análisis primario fue MIDI? Miramos el tipo del blob que guardó
+    // startAnalysis en currentAnalysisAudioBlob. Si es MIDI, el recorder
+    // ofrece dos modos (audio-mic + midi-teclado); si no, solo audio-mic.
+    _isPrimaryMidiAnalysis() {
+        const t = this.currentAnalysisAudioBlob?.type || '';
+        return t === 'audio/midi' || t === 'audio/x-midi';
+    },
+
+    _isMidiBlob(blob) {
+        const t = blob?.type || '';
+        return t === 'audio/midi' || t === 'audio/x-midi';
+    },
+
+    _renderAfterPracticeRecording(analysis) {
+        const el = document.getElementById('analysis-afterpractice-recorder');
+        if (!el) return;
+        const audioActive = !!this._afterPracticeRec?.mediaRecorder;
+        const midiActive = !!this._afterPracticeMidiRec?.isRecording;
+        const isRecording = audioActive || midiActive;
+
+        if (isRecording) {
+            const startTime = audioActive
+                ? this._afterPracticeRec.startTime
+                : this._afterPracticeMidiRec.startTime;
+            const kindLabel = audioActive ? 'audio con mic' : 'MIDI desde el teclado';
+            const elapsed = Date.now() - startTime;
+            el.innerHTML = `
+                <p class="afterpractice-recorder__hint">Grabando toma B (${escapeHtml(kindLabel)}) — tocá el fragmento y detené cuando termines.</p>
+                <span class="afterpractice-recorder__timer" data-role="ap-timer">${this._afterPracticeFormatTimer(elapsed)}</span>
+                <button type="button" class="afterpractice-recorder__btn afterpractice-recorder__btn--recording" data-action="ap-rec-stop">
+                    <i class="fas fa-stop"></i> Detener
+                </button>
+            `;
+        } else {
+            // Siempre ofrecemos ambos modos, independientemente del tipo del
+            // análisis original: el pianista puede grabar en audio o en MIDI
+            // según lo que tenga a mano en ese momento. El adapter A/B luego
+            // pintará el player que corresponda al blob que llegó.
+            const buttons = `
+                <button type="button" class="afterpractice-recorder__btn" data-action="ap-rec-start-audio">
+                    <i class="fas fa-microphone"></i> Grabar audio (mic)
+                </button>
+                <button type="button" class="afterpractice-recorder__btn" data-action="ap-rec-start-midi">
+                    <i class="fas fa-keyboard"></i> Grabar MIDI (teclado)
+                </button>
+            `;
+            el.innerHTML = `
+                <p class="afterpractice-recorder__hint">Volvé a tocar el fragmento y grabalo para comparar antes / después con tu oído.</p>
+                ${buttons}
+            `;
+            // Post-render async: si ya hay una toma guardada, actualizamos el copy.
+            getAfterPracticeTake(this._afterPracticeKey(analysis)).then((take) => {
+                if (!take || this._afterPracticeRec || this._afterPracticeMidiRec) return;
+                const hint = el.querySelector('.afterpractice-recorder__hint');
+                if (hint) hint.textContent = 'Ya tenés una toma B guardada abajo. Podés regrabar cuando quieras.';
+                el.querySelectorAll('[data-action="ap-rec-start-audio"] i').forEach(i => { i.className = 'fas fa-rotate'; });
+                el.querySelectorAll('[data-action="ap-rec-start-audio"]').forEach(b => {
+                    const span = b.childNodes[b.childNodes.length - 1];
+                    if (span && span.nodeType === Node.TEXT_NODE) span.textContent = ' Regrabar audio';
+                });
+                el.querySelectorAll('[data-action="ap-rec-start-midi"] i').forEach(i => { i.className = 'fas fa-rotate'; });
+                el.querySelectorAll('[data-action="ap-rec-start-midi"]').forEach(b => {
+                    const span = b.childNodes[b.childNodes.length - 1];
+                    if (span && span.nodeType === Node.TEXT_NODE) span.textContent = ' Regrabar MIDI';
+                });
+            });
+        }
+
+        // Delegación de eventos idempotente (reemplazamos innerHTML entero).
+        el.onclick = (ev) => {
+            const t = ev.target.closest('[data-action]');
+            if (!t) return;
+            const action = t.getAttribute('data-action');
+            if (action === 'ap-rec-start-audio') this._afterPracticeStartAudioRecording(analysis);
+            else if (action === 'ap-rec-start-midi') this._afterPracticeStartMidiRecording(analysis);
+            else if (action === 'ap-rec-stop') this._afterPracticeStopRecording(analysis);
+        };
+    },
+
+    async _afterPracticeStartAudioRecording(analysis) {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false,
+                },
+            });
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+                ? 'audio/webm;codecs=opus'
+                : 'audio/webm';
+            const mediaRecorder = new MediaRecorder(stream, { mimeType });
+            const chunks = [];
+            mediaRecorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+            mediaRecorder.onstop = async () => {
+                const rec = this._afterPracticeRec;
+                if (!rec) return;
+                const blob = new Blob(chunks, { type: mediaRecorder.mimeType || mimeType });
+                const durationMs = Date.now() - rec.startTime;
+                rec.stream?.getTracks().forEach(t => t.stop());
+                clearInterval(rec.timerInterval);
+                this._afterPracticeRec = null;
+
+                const ok = await saveAfterPracticeTake(
+                    this._afterPracticeKey(analysis),
+                    blob,
+                    { duration: durationMs / 1000 },
+                );
+                if (!ok) {
+                    this.showNotification?.('No se pudo guardar la toma B.', 'error');
+                }
+                this._renderAfterPracticeRecording(analysis);
+                await this._renderAbTakes(analysis);
+            };
+
+            this._afterPracticeRec = { mediaRecorder, stream, chunks, startTime: Date.now(), timerInterval: null };
+            mediaRecorder.start();
+            this._startAfterPracticeTimer();
+            this._renderAfterPracticeRecording(analysis);
+        } catch (err) {
+            console.error('[afterpractice] no se pudo iniciar audio:', err);
+            this.showNotification?.('No se pudo acceder al micrófono. Revisá los permisos.', 'error');
+            this._afterPracticeRec = null;
+            this._renderAfterPracticeRecording(analysis);
+        }
+    },
+
+    async _afterPracticeStartMidiRecording(analysis) {
+        try {
+            if (!this._afterPracticeMidiRec) {
+                this._afterPracticeMidiRec = new MidiRecorder();
+            }
+            const midiRec = this._afterPracticeMidiRec;
+            if (!midiRec.access) await midiRec.requestAccess();
+            midiRec.startRecording();
+            midiRec.startTime = Date.now();
+            midiRec.timerInterval = null;
+            this._startAfterPracticeTimer();
+            this._renderAfterPracticeRecording(analysis);
+        } catch (err) {
+            console.error('[afterpractice] no se pudo iniciar MIDI:', err);
+            this.showNotification?.('No se pudo iniciar la grabación MIDI. Verificá que el teclado esté conectado.', 'error');
+            this._afterPracticeMidiRec = null;
+            this._renderAfterPracticeRecording(analysis);
+        }
+    },
+
+    _startAfterPracticeTimer() {
+        // Refresca solo el nodo del cronómetro para no reconstruir DOM.
+        const tick = () => {
+            const timerEl = document.querySelector('[data-role="ap-timer"]');
+            if (!timerEl) return;
+            const audioStart = this._afterPracticeRec?.startTime;
+            const midiStart = this._afterPracticeMidiRec?.isRecording ? this._afterPracticeMidiRec.startTime : null;
+            const startTime = audioStart || midiStart;
+            if (!startTime) return;
+            timerEl.textContent = this._afterPracticeFormatTimer(Date.now() - startTime);
+        };
+        const interval = setInterval(tick, 500);
+        if (this._afterPracticeRec) this._afterPracticeRec.timerInterval = interval;
+        if (this._afterPracticeMidiRec) this._afterPracticeMidiRec.timerInterval = interval;
+    },
+
+    async _afterPracticeStopRecording(analysis) {
+        // Audio: delegamos al onstop del MediaRecorder (guarda y re-renderea).
+        if (this._afterPracticeRec?.mediaRecorder) {
+            try {
+                if (this._afterPracticeRec.mediaRecorder.state !== 'inactive') {
+                    this._afterPracticeRec.mediaRecorder.stop();
+                }
+            } catch (err) {
+                console.warn('[afterpractice] stop audio falló:', err);
+            }
+            return;
+        }
+        // MIDI: aquí sí hacemos el guardado inline porque MidiRecorder.stop
+        // devuelve el blob directamente en vez de vía callback.
+        if (this._afterPracticeMidiRec?.isRecording) {
+            try {
+                const result = await this._afterPracticeMidiRec.stopRecording();
+                clearInterval(this._afterPracticeMidiRec.timerInterval);
+                if (result?.blob) {
+                    const ok = await saveAfterPracticeTake(
+                        this._afterPracticeKey(analysis),
+                        result.blob,
+                        { duration: result.duration || 0 },
+                    );
+                    if (!ok) this.showNotification?.('No se pudo guardar la toma B.', 'error');
+                } else {
+                    this.showNotification?.('No se detectaron notas MIDI en la toma B.', 'warning');
+                }
+                this._renderAfterPracticeRecording(analysis);
+                await this._renderAbTakes(analysis);
+            } catch (err) {
+                console.error('[afterpractice] stop midi falló:', err);
+                this.showNotification?.('No se pudo detener la grabación MIDI.', 'error');
+            }
+        }
+    },
+
+    async _afterPracticeDiscardTake(analysis) {
+        await deleteAfterPracticeTake(this._afterPracticeKey(analysis));
+        this._destroyAbTakes();
+        this._renderAfterPracticeRecording(analysis);
+        await this._renderAbTakes(analysis);
+    },
+
+    // ═════════════════════════════════════════════════════════════════
+    // Comparación A/B — dos paneles con players intercambiables.
+    // Cada panel se monta como audio (WaveSurfer) o como MIDI
+    // (MidiPianoRoll) según el tipo del blob. Ambos exponen la misma
+    // interfaz mínima vía adapter (_buildAbPlayer): play, pause, isPlaying,
+    // seekToStart, onFinish, destroy.
+    // ═════════════════════════════════════════════════════════════════
+    _ab: null,
+
+    _destroyAbTakes() {
+        if (!this._ab) return;
+        try { this._ab.playerA?.destroy(); } catch {}
+        try { this._ab.playerB?.destroy(); } catch {}
+        if (this._ab.urlA) URL.revokeObjectURL(this._ab.urlA);
+        if (this._ab.urlB) URL.revokeObjectURL(this._ab.urlB);
+        this._ab = null;
+    },
+
+    // Monta un player en el container para el blob dado. Devuelve el adapter
+    // o null si no se pudo. Para MIDI usamos midiBlobToAnalysis para extraer
+    // las notas y luego un MidiPianoRoll compacto.
+    async _buildAbPlayer(container, blob, progressColor) {
+        if (!container || !(blob instanceof Blob)) return null;
+        container.innerHTML = '';
+
+        if (this._isMidiBlob(blob)) {
+            try {
+                const analysis = await midiBlobToAnalysis(blob);
+                const notes = Array.isArray(analysis?.midiNotes) ? analysis.midiNotes : [];
+                const duration = Number(analysis?.duration) || 0;
+                const roll = new MidiPianoRoll(container, { notes, duration, height: 90 });
+                let objUrl = null;
+                return {
+                    kind: 'midi',
+                    inst: roll,
+                    objUrl,
+                    play: () => roll.play(),
+                    pause: () => roll.pause(),
+                    isPlaying: () => !!roll.isPlaying,
+                    seekToStart: () => { try { roll.seek(0); } catch {} },
+                    onFinish: (cb) => roll.on('finish', cb),
+                    destroy: () => { try { roll.destroy(); } catch {} },
+                };
+            } catch (err) {
+                console.warn('[ab] no se pudo montar piano-roll MIDI:', err);
+                container.innerHTML = '<p class="ab-take__placeholder">No se pudo cargar la toma MIDI.</p>';
+                return null;
+            }
+        }
+
+        try {
+            const url = URL.createObjectURL(blob);
+            const ws = WaveSurfer.create({
+                container,
+                waveColor: 'rgba(255, 255, 255, 0.2)',
+                progressColor: progressColor || 'rgba(255, 255, 255, 0.55)',
+                cursorColor: 'rgba(255, 255, 255, 0.35)',
+                height: 68,
+                barWidth: 2,
+                barGap: 1,
+                barRadius: 1,
+                normalize: true,
+            });
+            ws.load(url);
+            return {
+                kind: 'audio',
+                inst: ws,
+                objUrl: url,
+                play: () => ws.play(),
+                pause: () => ws.pause(),
+                isPlaying: () => !!ws.isPlaying?.(),
+                seekToStart: () => { try { ws.seekTo(0); } catch {} },
+                onFinish: (cb) => ws.on('finish', cb),
+                destroy: () => { try { ws.destroy(); } catch {} },
+            };
+        } catch (err) {
+            console.error('[ab] no se pudo montar WaveSurfer:', err);
+            container.innerHTML = '<p class="ab-take__placeholder">No se pudo cargar la toma de audio.</p>';
+            return null;
+        }
+    },
+
+    async _renderAbTakes(analysis) {
+        const section = document.getElementById('analysis-ab-section');
+        if (!section) return;
+
+        this._destroyAbTakes();
+
+        const take = await getAfterPracticeTake(this._afterPracticeKey(analysis));
+        const takeBlob = take?.blob;
+        const takeAblob = this.currentAnalysisAudioBlob;
+        const hasB = takeBlob instanceof Blob;
+        const hasA = takeAblob instanceof Blob;
+
+        // Sin toma B el paso 07 queda oculto (aún no hay nada que comparar).
+        // Si hay B pero no A, mostramos igual el paso con solo B para que se
+        // pueda escuchar la toma post-experimento.
+        if (!hasB) {
+            section.classList.add('hidden');
+            return;
+        }
+
+        section.classList.remove('hidden');
+
+        const containerA = document.getElementById('ab-wave-a');
+        const containerB = document.getElementById('ab-wave-b');
+        const paneA = section.querySelector('.ab-take[data-take="a"]');
+        const paneB = section.querySelector('.ab-take[data-take="b"]');
+        const btnA = section.querySelector('[data-action="ab-play-a"]');
+        const btnB = section.querySelector('[data-action="ab-play-b"]');
+        const btnAlt = section.querySelector('[data-action="ab-alternate"]');
+        if (!containerA || !containerB) return;
+
+        // Captions dinámicas según lo que haya de cada lado.
+        const captionA = paneA?.querySelector('.ab-take__caption');
+        const captionB = paneB?.querySelector('.ab-take__caption');
+        if (captionA) {
+            captionA.textContent = hasA
+                ? (this._isMidiBlob(takeAblob) ? 'Grabación original (MIDI)' : 'Grabación original del análisis')
+                : 'Toma original no disponible';
+        }
+        if (captionB) {
+            captionB.textContent = this._isMidiBlob(takeBlob)
+                ? 'Toma post-experimento (MIDI)'
+                : 'Toma post-experimento';
+        }
+
+        // Panel A: si no hay A, mostramos placeholder y ocultamos el botón play.
+        let playerA = null;
+        if (hasA) {
+            playerA = await this._buildAbPlayer(
+                containerA, takeAblob,
+                'rgba(78, 196, 255, 0.85)',
+            );
+            btnA?.removeAttribute('hidden');
+        } else {
+            containerA.innerHTML = '<p class="ab-take__placeholder">No hay grabación original guardada para este análisis.</p>';
+            btnA?.setAttribute('hidden', '');
+        }
+
+        // Panel B: siempre debería tener contenido si hasB.
+        const playerB = await this._buildAbPlayer(
+            containerB, takeBlob,
+            'rgba(169, 112, 255, 0.85)',
+        );
+
+        // El botón "escuchar A → B" solo tiene sentido si ambos players existen.
+        if (!playerA || !playerB) {
+            btnAlt?.setAttribute('hidden', '');
+        } else {
+            btnAlt?.removeAttribute('hidden');
+        }
+
+        this._ab = {
+            playerA,
+            playerB,
+            urlA: playerA?.objUrl || null,
+            urlB: playerB?.objUrl || null,
+            mode: 'idle',
+        };
+
+        // Handlers unificados sobre el adapter — mismo código sirve para audio
+        // y MIDI.
+        const setPlayingUI = (which) => {
+            [btnA, btnB].forEach(b => b?.classList.remove('is-playing'));
+            if (which === 'a') btnA?.classList.add('is-playing');
+            if (which === 'b') btnB?.classList.add('is-playing');
+        };
+        const clearAltUI = () => btnAlt?.classList.remove('is-active');
+        const stopBoth = () => {
+            try { playerA?.pause(); } catch {}
+            try { playerB?.pause(); } catch {}
+            setPlayingUI(null);
+            clearAltUI();
+            if (this._ab) this._ab.mode = 'idle';
+        };
+
+        playerA?.onFinish(() => {
+            if (this._ab?.mode === 'alt-a-then-b' && playerB) {
+                this._ab.mode = 'alt-b';
+                playerB.seekToStart();
+                playerB.play();
+                setPlayingUI('b');
+            } else {
+                setPlayingUI(null);
+                if (this._ab) this._ab.mode = 'idle';
+            }
+        });
+        playerB?.onFinish(() => {
+            setPlayingUI(null);
+            clearAltUI();
+            if (this._ab) this._ab.mode = 'idle';
+        });
+
+        section.onclick = (ev) => {
+            const t = ev.target.closest('[data-action]');
+            if (!t) return;
+            const action = t.getAttribute('data-action');
+            if (action === 'ab-play-a') {
+                if (!playerA) return;
+                if (playerA.isPlaying()) { stopBoth(); return; }
+                try { playerB?.pause(); } catch {}
+                clearAltUI();
+                this._ab.mode = 'a';
+                playerA.play();
+                setPlayingUI('a');
+            } else if (action === 'ab-play-b') {
+                if (!playerB) return;
+                if (playerB.isPlaying()) { stopBoth(); return; }
+                try { playerA?.pause(); } catch {}
+                clearAltUI();
+                this._ab.mode = 'b';
+                playerB.play();
+                setPlayingUI('b');
+            } else if (action === 'ab-alternate') {
+                if (!playerA || !playerB) return;
+                if (this._ab?.mode?.startsWith('alt')) { stopBoth(); return; }
+                try { playerB.pause(); } catch {}
+                playerA.seekToStart();
+                playerB.seekToStart();
+                this._ab.mode = 'alt-a-then-b';
+                playerA.play();
+                setPlayingUI('a');
+                btnAlt?.classList.add('is-active');
+            } else if (action === 'ab-discard') {
+                stopBoth();
+                this._afterPracticeDiscardTake(analysis);
+            }
+        };
     },
 
     // "Tu oído vs los datos" — Fase A SRL. Aparece SOLO si vino autoevaluación
@@ -411,11 +1132,15 @@ export const audioFlowMixin = {
         else basicPitchLabel = { icon: '—', cls: 'warn', text: 'Basic Pitch no se ejecutó' };
 
         // LLM que sintetizó el feedback — se deriva del source del aiAnalysis.
+        // Nombres de modelo alineados con los defaults reales de cada proxy
+        // (ver groq-proxy/index.ts, gemini-proxy/index.ts, openrouter-proxy/index.ts).
         const llmMap = {
-            'ai-groq':         { name: 'Groq', model: 'compound-mini', cls: 'ok' },
-            'ai-groq+audio':   { name: 'Groq', model: 'compound-mini', cls: 'ok' },
-            'ai-gemini':       { name: 'Gemini', model: 'gemini-1.5-flash', cls: 'ok' },
-            'ai-gemini+audio': { name: 'Gemini', model: 'gemini-1.5-flash', cls: 'ok' },
+            'ai-groq':             { name: 'Groq', model: 'compound', cls: 'ok' },
+            'ai-groq+audio':       { name: 'Groq', model: 'compound', cls: 'ok' },
+            'ai-gemini':           { name: 'Gemini', model: 'gemini-flash-latest', cls: 'ok' },
+            'ai-gemini+audio':     { name: 'Gemini', model: 'gemini-flash-latest', cls: 'ok' },
+            'ai-openrouter':       { name: 'OpenRouter (free)', model: 'dots-studio/dots-3-note-preview:free', cls: 'ok' },
+            'ai-openrouter+audio': { name: 'OpenRouter (free)', model: 'dots-studio/dots-3-note-preview:free + escucha Gemini', cls: 'ok' },
             'fallback-parse-error':    { name: 'Fallback', model: 'JSON inválido del LLM', cls: 'fail' },
             'fallback-schema-invalid': { name: 'Fallback', model: 'schema inválido del LLM', cls: 'fail' },
             'fallback-network':        { name: 'Fallback', model: 'ningún LLM respondió', cls: 'fail' },
@@ -741,8 +1466,24 @@ export const audioFlowMixin = {
 
         try {
             this.updateAnalysisProgress(15);
-            await this.audioAnalyzer.init();
-            const audioAnalysis = await this.audioAnalyzer.analyzeAudio(audioBlob, { enableMidiTranscription: true });
+            // Detectar si la grabación seleccionada es MIDI (fue subida como .mid).
+            // La usamos para saltar Essentia/basic-pitch/Gemini-audio: con MIDI
+            // ya tenemos notas exactas y no hay audio que "escuchar".
+            // "current" es una opción sintética del dropdown que no vive en
+            // tempRecordings, así que ahí caemos al mime type del blob (los
+            // blobs generados por MidiRecorder salen con type 'audio/midi').
+            const selectedRec = (this.tempRecordings || []).find(r => String(r.id) === String(selection));
+            const isMidi = selectedRec?.format === 'midi'
+                || (selectedRec?.filePath && String(selectedRec.filePath).endsWith('.mid'))
+                || (selection === 'current' && audioBlob?.type === 'audio/midi');
+
+            let audioAnalysis;
+            if (isMidi) {
+                audioAnalysis = await midiBlobToAnalysis(audioBlob);
+            } else {
+                await this.audioAnalyzer.init();
+                audioAnalysis = await this.audioAnalyzer.analyzeAudio(audioBlob, { enableMidiTranscription: true });
+            }
             this.updateAnalysisProgress(40);
 
             // Contexto declarado por el usuario en la UI de análisis. Todos opcionales;
@@ -774,7 +1515,9 @@ export const audioFlowMixin = {
             // el toggle "Escucha profunda (Gemini)" (default ON).
             let auditoryLayer = null;
             const geminiOn = this._isGeminiAudioEnabled();
-            if (GEMINI_AUDIO_CONFIG.enabled && geminiOn) {
+            // La escucha profunda con Gemini requiere audio real — con MIDI
+            // saltamos esta capa entera; las notas exactas ya son mejor input.
+            if (GEMINI_AUDIO_CONFIG.enabled && geminiOn && !isMidi) {
                 try {
                     const derived = deriveFeatures(audioAnalysis);
                     const segments = selectSegments(audioAnalysis, derived);
@@ -827,6 +1570,7 @@ export const audioFlowMixin = {
                 auditoryLayer,
                 reliability,
                 selfEvaluation: selfEval,
+                metadata,
                 geminiRequested: geminiOn,
                 timestamp: Date.now()
             };
@@ -861,14 +1605,21 @@ export const audioFlowMixin = {
         const badgeEl = document.getElementById('analysis-source-badge');
         if (badgeEl) {
             const source = String(aiAnalysis?.source || '');
+            // Mensaje único para cualquier fallback (parse, schema, network):
+            // el usuario no distingue entre "JSON malformado" y "sin conexión",
+            // y la app ya reintentó internamente antes de mostrar esto. El
+            // source real queda en aiAnalysis.source para debug/telemetría.
+            const FALLBACK_MSG = 'No pudimos obtener una respuesta completa de la IA. Volvé a intentar en unos segundos.';
             const badges = {
-                'ai-groq':          { cls: 'is-real', icon: 'fa-check-circle', text: 'Análisis con IA (Groq) — respuesta específica para tu grabación' },
-                'ai-gemini':        { cls: 'is-real', icon: 'fa-check-circle', text: 'Análisis con IA (Gemini) — respuesta específica para tu grabación' },
-                'ai-groq+audio':    { cls: 'is-real', icon: 'fa-check-circle', text: 'Análisis con IA (Groq) + escucha profunda con Gemini — respuesta específica para tu grabación' },
-                'ai-gemini+audio':  { cls: 'is-real', icon: 'fa-check-circle', text: 'Análisis con IA (Gemini) + escucha profunda — respuesta específica para tu grabación' },
-                'fallback-parse-error':    { cls: 'is-fallback', icon: 'fa-triangle-exclamation', text: 'Respuesta genérica — la IA respondió pero no fue JSON parseable. Volvé a intentar en un minuto.' },
-                'fallback-schema-invalid': { cls: 'is-fallback', icon: 'fa-triangle-exclamation', text: 'Respuesta genérica — la IA devolvió JSON con campos faltantes o inválidos. Volvé a intentar.' },
-                'fallback-network': { cls: 'is-fallback', icon: 'fa-triangle-exclamation', text: 'Respuesta genérica — la IA no respondió. Revisá tu conexión y volvé a intentar.' },
+                'ai-groq':              { cls: 'is-real', icon: 'fa-check-circle', text: 'Análisis con IA (Groq) — respuesta específica para tu grabación' },
+                'ai-gemini':            { cls: 'is-real', icon: 'fa-check-circle', text: 'Análisis con IA (Gemini) — respuesta específica para tu grabación' },
+                'ai-openrouter':        { cls: 'is-real', icon: 'fa-check-circle', text: 'Análisis con IA (OpenRouter) — respuesta específica para tu grabación' },
+                'ai-groq+audio':        { cls: 'is-real', icon: 'fa-check-circle', text: 'Análisis con IA (Groq) + escucha profunda con Gemini — respuesta específica para tu grabación' },
+                'ai-gemini+audio':      { cls: 'is-real', icon: 'fa-check-circle', text: 'Análisis con IA (Gemini) + escucha profunda — respuesta específica para tu grabación' },
+                'ai-openrouter+audio':  { cls: 'is-real', icon: 'fa-check-circle', text: 'Análisis con IA (OpenRouter) + escucha profunda con Gemini — respuesta específica para tu grabación' },
+                'fallback-parse-error':    { cls: 'is-fallback', icon: 'fa-triangle-exclamation', text: FALLBACK_MSG },
+                'fallback-schema-invalid': { cls: 'is-fallback', icon: 'fa-triangle-exclamation', text: FALLBACK_MSG },
+                'fallback-network':        { cls: 'is-fallback', icon: 'fa-triangle-exclamation', text: FALLBACK_MSG },
             };
             const b = badges[source] || badges['fallback-network'];
             const used = Array.isArray(audioAnalysis?.providersUsed) ? audioAnalysis.providersUsed : [];
@@ -893,48 +1644,19 @@ export const audioFlowMixin = {
         const keyStrength = Number(audioAnalysis?.key?.strength || 0);
         const dynamic = Number(audioAnalysis?.loudness?.dynamicComplexity || 0);
 
-        document.getElementById('detected-tempo').textContent = `${tempoBpm || '--'} BPM`;
-        document.getElementById('detected-key').textContent = `${keyName}${keyScale ? ` ${keyScale}` : ''}`;
-        document.getElementById('overall-score').textContent = `${aiAnalysis.overallScore}/10`;
-        document.getElementById('recording-duration').textContent = this.formatDuration(Math.floor(audioAnalysis.duration));
+        // Tempo, tonalidad y score se calculan (la IA los usa internamente) pero
+        // no se muestran al usuario. Solo pintamos la duración.
+        const durEl = document.getElementById('recording-duration');
+        if (durEl) durEl.textContent = this.formatDuration(Math.floor(audioAnalysis.duration));
 
-        const bpmValueEl = document.getElementById('metric-bpm-value');
-        const bpmConfBarEl = document.getElementById('metric-bpm-confidence');
-        const bpmConfTextEl = document.getElementById('metric-bpm-confidence-text');
-        if (bpmValueEl) bpmValueEl.textContent = `${tempoBpm || '--'} BPM`;
-        if (bpmConfBarEl) bpmConfBarEl.style.width = `${Math.max(0, Math.min(100, tempoConfidence * 100))}%`;
-        if (bpmConfTextEl) bpmConfTextEl.textContent = `Confianza ${(tempoConfidence * 100).toFixed(0)}%`;
-
-        const keyValueEl = document.getElementById('metric-key-value');
-        const keyStrengthBarEl = document.getElementById('metric-key-strength');
-        const keyStrengthTextEl = document.getElementById('metric-key-strength-text');
-        if (keyValueEl) keyValueEl.textContent = `${keyName}${keyScale ? ` ${keyScale}` : ''}`;
-        if (keyStrengthBarEl) keyStrengthBarEl.style.width = `${Math.max(0, Math.min(100, keyStrength * 100))}%`;
-        if (keyStrengthTextEl) keyStrengthTextEl.textContent = `Fuerza ${(keyStrength * 100).toFixed(0)}%`;
-
-        const dynGaugeEl = document.getElementById('metric-dynamic-gauge');
-        const dynTextEl = document.getElementById('metric-dynamic-text');
-        if (dynGaugeEl) dynGaugeEl.style.width = `${Math.max(0, Math.min(100, dynamic * 100))}%`;
-        if (dynTextEl) dynTextEl.textContent = `Complejidad ${(dynamic || 0).toFixed(2)}`;
-
+        // El bloque "Notas detectadas (Basic Pitch)" era útil para la IA pero
+        // ruido para el pianista — se oculta siempre. La visualización real de
+        // las notas (para grabaciones MIDI) va en el piano-roll de "Reproductor
+        // con marcas" (_initAnalysisWavesurfer).
         const midiContainer = document.getElementById('midi-notes-container');
         const midiList = document.getElementById('midi-notes-list');
-        const midiNotes = Array.isArray(audioAnalysis?.midiNotes) ? audioAnalysis.midiNotes : [];
-        if (midiContainer && midiList) {
-            if (midiNotes.length > 0) {
-                midiContainer.classList.remove('hidden');
-                midiList.innerHTML = midiNotes.slice(0, 24).map((n) => {
-                    const pitchMidi = Number(n?.pitchMidi ?? n?.pitch ?? 0);
-                    const start = Number(n?.startTimeSeconds ?? n?.start ?? 0);
-                    const dur = Number(n?.durationSeconds ?? n?.duration ?? 0);
-                    const amp = Number(n?.amplitude ?? 0);
-                    return `<div class="midi-note-item">MIDI ${escapeHtml(String(Math.round(pitchMidi)))} · ${escapeHtml(start.toFixed(2))}s → ${escapeHtml((start + dur).toFixed(2))}s · amp ${escapeHtml(amp.toFixed(2))}</div>`;
-                }).join('');
-            } else {
-                midiContainer.classList.add('hidden');
-                midiList.innerHTML = '';
-            }
-        }
+        if (midiContainer) midiContainer.classList.add('hidden');
+        if (midiList) midiList.innerHTML = '';
 
         const musicalEl = document.getElementById('musical-analysis');
         if (musicalEl) {
@@ -960,6 +1682,43 @@ export const audioFlowMixin = {
 
         // Lo que estás haciendo bien — máx 2 puntos concretos (schema REGLA 8).
         this._renderStrengths(aiAnalysis?.strengths || []);
+
+        // Paso 01 del recorrido — Tu percepción (autoevaluación previa).
+        // Se pinta como primer bloque del flujo con lo que el pianista ya
+        // respondió en el modal; si saltó, la sección queda oculta.
+        this._renderPerception(this.currentAnalysis?.selfEvaluation);
+
+        // Paso 06 del recorrido — Después de practicar.
+        // Reseteamos borrador/edit al cambiar de análisis para que el estado
+        // temporal de otro análisis no se mezcle con este. La persistencia
+        // real vive en localStorage y se recupera dentro de _renderAfterPractice.
+        this._afterPracticeDraft = null;
+        this._afterPracticeEditing = false;
+        this._renderAfterPractice(this.currentAnalysis);
+
+        // Fase 3 — Zona de grabación de toma B + comparación A/B.
+        // Cancelamos silenciosamente cualquier grabación colgada del análisis
+        // previo (audio o MIDI) y destruimos players anteriores antes de
+        // montar los del análisis nuevo.
+        if (this._afterPracticeRec?.mediaRecorder) {
+            try {
+                if (this._afterPracticeRec.mediaRecorder.state !== 'inactive') {
+                    this._afterPracticeRec.mediaRecorder.stop();
+                }
+                this._afterPracticeRec.stream?.getTracks().forEach(t => t.stop());
+                clearInterval(this._afterPracticeRec.timerInterval);
+            } catch {}
+            this._afterPracticeRec = null;
+        }
+        if (this._afterPracticeMidiRec?.isRecording) {
+            try {
+                this._afterPracticeMidiRec.stopRecording();
+                clearInterval(this._afterPracticeMidiRec.timerInterval);
+            } catch {}
+        }
+        this._destroyAbTakes();
+        this._renderAfterPracticeRecording(this.currentAnalysis);
+        this._renderAbTakes(this.currentAnalysis);
 
         // Tu oído vs los datos — Fase A SRL. Aparece solo si vino self-eval y
         // el modelo llenó beliefVsDetection (REGLA 10).
@@ -1012,6 +1771,94 @@ export const audioFlowMixin = {
         const container = document.getElementById('analysis-wavesurfer');
         if (!container || !(this.currentAnalysisAudioBlob instanceof Blob)) return;
 
+        // WaveSurfer no puede renderizar MIDI. Para grabaciones MIDI armamos
+        // un piano roll SVG con reproducción por síntesis (triángulos + ADSR
+        // simple vía Web Audio), replicando la UX de la rama audio: momentos
+        // clicables, click para seek, drag para marcar región de foco, botón
+        // play/pausa y loop de fragmento reciclando los mismos elementos.
+        const isMidi = String(this.currentAnalysis?.audioAnalysis?.source || '') === 'midi-input';
+        if (isMidi) {
+            const timelineEl = document.getElementById('analysis-wavesurfer-timeline');
+            if (timelineEl) timelineEl.innerHTML = '';   // el piano roll trae su propio eje
+            const audioAnalysis = this.currentAnalysis?.audioAnalysis || {};
+            const roll = new MidiPianoRoll(container, {
+                notes: audioAnalysis.midiNotes || [],
+                duration: Number(audioAnalysis.duration || 0),
+                height: 160,
+            });
+            this.analysisMidiPianoRoll = roll;
+            this.analysisUserRegion = null;
+
+            const noteEl = document.getElementById('analysis-moment-note');
+            const timeEl = document.getElementById('analysis-time-label');
+            const updateTime = () => {
+                if (!timeEl) return;
+                timeEl.textContent = `${this.formatDuration(roll.getCurrentTime())} / ${this.formatDuration(roll.getDuration())}`;
+            };
+            this._setAnalysisPlayLabel(false);
+            updateTime();
+            roll.on('play', () => this._setAnalysisPlayLabel(true));
+            roll.on('pause', () => this._setAnalysisPlayLabel(false));
+            roll.on('finish', () => this._setAnalysisPlayLabel(false));
+            roll.on('audioprocess', updateTime);
+            roll.on('seeking', updateTime);
+            roll.on('ready', () => {
+                updateTime();
+                const moments = Array.isArray(this.currentAnalysis?.aiAnalysis?.moments)
+                    ? this.currentAnalysis.aiAnalysis.moments
+                    : [];
+                roll.setMoments(moments);
+            });
+            roll.on('moment-click', (m) => {
+                if (noteEl) noteEl.textContent = String(m?.note || '');
+            });
+            roll.on('region-created', (region) => {
+                this.analysisUserRegion = region;
+                this._updateAnalysisFocusUi();
+            });
+            roll.on('region-cleared', () => {
+                this.analysisUserRegion = null;
+                this._updateAnalysisFocusUi();
+            });
+
+            // Botones del transporte — reutilizan los mismos IDs. Uso guard
+            // '_analysisMidiWired' distinto al de wavesurfer para no colisionar
+            // (si el usuario cambia entre grabaciones el estado se reinicia).
+            const playBtn = document.getElementById('analysis-play-btn');
+            if (playBtn) {
+                const newPlay = playBtn.cloneNode(true);
+                playBtn.replaceWith(newPlay);
+                newPlay.addEventListener('click', () => this.analysisMidiPianoRoll?.playPause());
+            }
+            const playRegionBtn = document.getElementById('analysis-play-region-btn');
+            if (playRegionBtn) {
+                const newBtn = playRegionBtn.cloneNode(true);
+                playRegionBtn.replaceWith(newBtn);
+                newBtn.addEventListener('click', () => {
+                    const r = this.analysisUserRegion;
+                    if (r) this.analysisMidiPianoRoll?.playRegion(r);
+                });
+            }
+            const clearRegionBtn = document.getElementById('analysis-clear-region-btn');
+            if (clearRegionBtn) {
+                const newBtn = clearRegionBtn.cloneNode(true);
+                clearRegionBtn.replaceWith(newBtn);
+                newBtn.addEventListener('click', () => {
+                    this.analysisMidiPianoRoll?.clearUserRegion();
+                });
+            }
+            const chipClearBtn = document.querySelector('#analysis-chat-focus-chip .focus-chip-clear');
+            if (chipClearBtn) {
+                const newBtn = chipClearBtn.cloneNode(true);
+                chipClearBtn.replaceWith(newBtn);
+                newBtn.addEventListener('click', () => {
+                    this.analysisMidiPianoRoll?.clearUserRegion();
+                });
+            }
+            this._updateAnalysisFocusUi();
+            return;
+        }
+
         const rootStyles = getComputedStyle(document.documentElement);
         const accent = rootStyles.getPropertyValue('--accent-green').trim() || '#00ff41';
         const textPrimary = rootStyles.getPropertyValue('--text-primary').trim() || '#ffffff';
@@ -1048,6 +1895,15 @@ export const audioFlowMixin = {
         const regionsPlugin = ws.registerPlugin(RegionsPlugin.create());
         this.analysisWavesurfer = ws;
         this.analysisRegionsPlugin = regionsPlugin;
+        // Slot único para la región que dibuja el usuario. Sirve para: (a)
+        // pasar el rango a AIAnalysisEngine.answerQuestion como focusRegion,
+        // y (b) mostrar/ocultar el chip "Preguntando sobre X:XX–Y:YY".
+        // Distinta de las regiones que la IA genera (moments), que son fijas.
+        this.analysisUserRegion = null;
+        // Habilita drag-selection para que el usuario pueda marcar cualquier
+        // fragmento libre. Color azul para diferenciarlo del verde de Grabar
+        // y del código de colores de los moments (good/improve/neutral).
+        regionsPlugin.enableDragSelection({ color: 'rgba(64, 128, 255, 0.28)' });
 
         const noteEl = document.getElementById('analysis-moment-note');
         const timeEl = document.getElementById('analysis-time-label');
@@ -1074,6 +1930,15 @@ export const audioFlowMixin = {
                 improve: 'rgba(255, 160, 0, 0.28)',
                 neutral: 'rgba(160, 160, 160, 0.22)',
             };
+            // Los moments necesitan NO capturar mouse events, sino
+            // `enableDragSelection` no arranca sobre esas zonas. Wavesurfer
+            // regions v7 crea CADA región con `pointer-events: all` HARDCODED
+            // en el style (la opción `interact` es fake, no existe). Fix
+            // real: forzar `pointer-events: none` en el DOM element después
+            // de crear la región. Y `pointer-events: none` en el .content
+            // interno (la caja del texto) que hereda por default. El hover/
+            // click de la nota se reemplaza con lookup manual abajo.
+            const momentSpans = [];
             for (const m of moments) {
                 const start = Math.max(0, Math.min(total, Number(m?.timeStart) || 0));
                 const end = Math.max(start + 0.1, Math.min(total, Number(m?.timeEnd) || start + 1));
@@ -1087,23 +1952,116 @@ export const audioFlowMixin = {
                     resize: false,
                     content: String(m?.note || '').slice(0, 80),
                 });
-                region.on('click', () => {
-                    ws.setTime(start);
-                    if (noteEl) noteEl.textContent = String(m?.note || '');
+                // Wavesurfer setea pointer-events:all en el style inline al
+                // renderizar; sobreescribimos después. Element ya existe
+                // porque addRegion lo crea sincrónico cuando ya hay duration.
+                if (region.element) {
+                    region.element.style.pointerEvents = 'none';
+                    // El content (caja de texto flotante) también, para que no
+                    // capture eventos aunque quede visible arriba de la región.
+                    const contentEl = region.element.querySelector('[part="region-content"]');
+                    if (contentEl) contentEl.style.pointerEvents = 'none';
+                }
+                momentSpans.push({ start, end, note: String(m?.note || '') });
+            }
+
+            // Reemplazo del hover nativo por lookup manual sobre el contenedor.
+            // Encuentra el moment más cercano a la posición del cursor y lo
+            // muestra en el chip de nota. Se detiene cuando el cursor sale
+            // del waveform.
+            if (noteEl && momentSpans.length && container) {
+                const containerRect = () => container.getBoundingClientRect();
+                const findMomentAt = (timeSec) => {
+                    for (const m of momentSpans) {
+                        if (timeSec >= m.start && timeSec <= m.end) return m;
+                    }
+                    return null;
+                };
+                container.addEventListener('pointermove', (e) => {
+                    const rect = containerRect();
+                    if (rect.width <= 0) return;
+                    const x = e.clientX - rect.left;
+                    const ratio = Math.max(0, Math.min(1, x / rect.width));
+                    const t = ratio * total;
+                    const m = findMomentAt(t);
+                    if (m) noteEl.textContent = m.note;
                 });
-                region.on('over', () => {
-                    if (noteEl) noteEl.textContent = String(m?.note || '');
+                container.addEventListener('click', (e) => {
+                    const rect = containerRect();
+                    if (rect.width <= 0) return;
+                    const x = e.clientX - rect.left;
+                    const ratio = Math.max(0, Math.min(1, x / rect.width));
+                    const t = ratio * total;
+                    const m = findMomentAt(t);
+                    if (m) noteEl.textContent = m.note;
                 });
             }
         });
 
         const playBtn = document.getElementById('analysis-play-btn');
-        if (playBtn && !playBtn._analysisWired) {
-            playBtn._analysisWired = true;
-            playBtn.addEventListener('click', () => {
+        if (playBtn) {
+            const newPlay = playBtn.cloneNode(true);
+            playBtn.replaceWith(newPlay);
+            newPlay.addEventListener('click', () => {
                 if (this.analysisWavesurfer) this.analysisWavesurfer.playPause();
             });
         }
+
+        // region-created: la dispara enableDragSelection cuando el usuario
+        // termina de arrastrar. Distingue la región del usuario de las de la
+        // IA por color (las de IA se crearon con drag:false,resize:false).
+        regionsPlugin.on('region-created', (region) => {
+            if (region.drag === false || region.resize === false) return; // región de IA
+            // Solo una región de usuario a la vez: borrar la anterior si existía.
+            if (this.analysisUserRegion && this.analysisUserRegion !== region) {
+                try { this.analysisUserRegion.remove(); } catch { /* ya no existe */ }
+            }
+            this.analysisUserRegion = region;
+            this._updateAnalysisFocusUi();
+            region.on('remove', () => {
+                if (this.analysisUserRegion === region) {
+                    this.analysisUserRegion = null;
+                    this._updateAnalysisFocusUi();
+                }
+            });
+            region.on('update-end', () => this._updateAnalysisFocusUi());
+        });
+
+        const playRegionBtn = document.getElementById('analysis-play-region-btn');
+        if (playRegionBtn) {
+            const newBtn = playRegionBtn.cloneNode(true);
+            playRegionBtn.replaceWith(newBtn);
+            newBtn.addEventListener('click', () => {
+                const r = this.analysisUserRegion;
+                if (!r) return;
+                try { r.play(true); } catch (e) { console.warn('play region falló:', e); }
+            });
+        }
+        const clearRegionBtn = document.getElementById('analysis-clear-region-btn');
+        if (clearRegionBtn) {
+            const newBtn = clearRegionBtn.cloneNode(true);
+            clearRegionBtn.replaceWith(newBtn);
+            newBtn.addEventListener('click', () => {
+                if (this.analysisUserRegion) {
+                    try { this.analysisUserRegion.remove(); } catch { /* ya no */ }
+                    this.analysisUserRegion = null;
+                    this._updateAnalysisFocusUi();
+                }
+            });
+        }
+        const chipClearBtn = document.querySelector('#analysis-chat-focus-chip .focus-chip-clear');
+        if (chipClearBtn) {
+            const newBtn = chipClearBtn.cloneNode(true);
+            chipClearBtn.replaceWith(newBtn);
+            newBtn.addEventListener('click', () => {
+                if (this.analysisUserRegion) {
+                    try { this.analysisUserRegion.remove(); } catch { /* ya no */ }
+                    this.analysisUserRegion = null;
+                }
+                this._updateAnalysisFocusUi();
+            });
+        }
+        this._updateAnalysisFocusUi();
 
         const loadPromise = typeof ws.loadBlob === 'function'
             ? ws.loadBlob(this.currentAnalysisAudioBlob)
@@ -1120,10 +2078,44 @@ export const audioFlowMixin = {
         } catch {
             // Ignore destroy errors — the instance may already be gone.
         }
+        try {
+            this.analysisMidiPianoRoll?.destroy();
+        } catch {
+            // idem para el piano roll
+        }
         this.analysisWavesurfer = null;
         this.analysisRegionsPlugin = null;
+        this.analysisMidiPianoRoll = null;
+        this.analysisUserRegion = null;
         const noteEl = document.getElementById('analysis-moment-note');
         if (noteEl) noteEl.textContent = '';
+        this._updateAnalysisFocusUi();
+    },
+
+    // Refresca los tres controles del "fragmento en foco":
+    //   - Chip debajo del chat ("Preguntando sobre X:XX–Y:YY")
+    //   - Botones Loop/Limpiar en el transporte del reproductor
+    // Se llama cada vez que la región del usuario cambia (crear/mover/borrar).
+    _updateAnalysisFocusUi() {
+        const chip = document.getElementById('analysis-chat-focus-chip');
+        const playRegionBtn = document.getElementById('analysis-play-region-btn');
+        const clearRegionBtn = document.getElementById('analysis-clear-region-btn');
+        const region = this.analysisUserRegion;
+        if (!region) {
+            if (chip) chip.hidden = true;
+            if (playRegionBtn) playRegionBtn.hidden = true;
+            if (clearRegionBtn) clearRegionBtn.hidden = true;
+            return;
+        }
+        const start = Number(region.start) || 0;
+        const end = Number(region.end) || start;
+        const rangeEl = chip?.querySelector('[data-role="focus-range"]');
+        if (rangeEl) {
+            rangeEl.textContent = `${this.formatDuration(start)} – ${this.formatDuration(end)}`;
+        }
+        if (chip) chip.hidden = false;
+        if (playRegionBtn) playRegionBtn.hidden = false;
+        if (clearRegionBtn) clearRegionBtn.hidden = false;
     },
 
     _setAnalysisPlayLabel(isPlaying) {
@@ -1346,6 +2338,33 @@ export const audioFlowMixin = {
         this.displayAnalysisResults();
     },
 
+    // Detecta si un mensaje del asistente vino del fallback local en vez de la
+    // IA real. El fallback siempre arranca con esta frase fija — ver
+    // AIAnalysisEngine.getFallbackAnswer(..., true).
+    _isChatFallbackText(text) {
+        return String(text || '').trimStart().startsWith('No pude conectar con la IA');
+    },
+
+    // Chips de follow-up. Estáticos (no le pedimos otra ronda al modelo por
+    // cada respuesta — sería otro request y más latencia). La lista es genérica
+    // pero cubre bien las próximas preguntas típicas después de una respuesta
+    // del análisis, y siempre se ofrecen las tres más relevantes según el
+    // fragmento en foco y el estado del análisis.
+    _analysisChatSuggestions() {
+        const suggestions = [];
+        if (this.analysisUserRegion) {
+            suggestions.push('¿Qué está pasando exactamente en este fragmento?');
+            suggestions.push('Dame un ejercicio específico para practicar este pasaje.');
+        } else {
+            suggestions.push('Dame un ejercicio concreto para lo que me señalaste.');
+            suggestions.push('¿Y para la mano izquierda qué me sugerís?');
+        }
+        const primary = String(this.currentAnalysis?.aiAnalysis?.primaryFocus || '').trim();
+        if (primary) suggestions.push('¿Por qué elegiste ese foco principal?');
+        else suggestions.push('¿En qué compás o rango me tengo que fijar?');
+        return suggestions.slice(0, 3);
+    },
+
     renderAnalysisChat() {
         const container = document.getElementById('analysis-chat-messages');
         if (!container) return;
@@ -1355,13 +2374,69 @@ export const audioFlowMixin = {
             return;
         }
 
-        container.innerHTML = this.analysisChat.map(m => {
+        // La última respuesta del asistente lleva chips de follow-up (o botón
+        // de reintentar si vino del fallback). Las anteriores se dejan limpias
+        // para no llenar el hilo de botones.
+        const lastAssistantIdx = (() => {
+            for (let i = this.analysisChat.length - 1; i >= 0; i--) {
+                if (this.analysisChat[i].role === 'assistant') return i;
+            }
+            return -1;
+        })();
+
+        container.innerHTML = this.analysisChat.map((m, idx) => {
             const role = m.role === 'user' ? 'Tú' : 'NeuralJam';
             const cls = m.role === 'user' ? 'user' : 'assistant';
-            return `<div class="chat-message ${cls}"><div class="chat-role">${escapeHtml(role)}</div><div class="chat-text">${escapeHtml(m.text)}</div></div>`;
+            const isLastAssistant = idx === lastAssistantIdx && m.role === 'assistant';
+            let extra = '';
+            if (isLastAssistant) {
+                if (this._isChatFallbackText(m.text)) {
+                    extra = `<div class="chat-actions"><button type="button" class="chat-retry-btn" data-action="chat-retry"><i class="fas fa-rotate-right"></i> Reintentar</button></div>`;
+                } else {
+                    const chips = this._analysisChatSuggestions()
+                        .map(q => `<button type="button" class="chat-suggestion" data-action="chat-suggest" data-q="${escapeHtml(q)}">${escapeHtml(q)}</button>`)
+                        .join('');
+                    extra = `<div class="chat-suggestions">${chips}</div>`;
+                }
+            }
+            return `<div class="chat-message ${cls}"><div class="chat-role">${escapeHtml(role)}</div><div class="chat-text">${escapeHtml(m.text)}</div>${extra}</div>`;
         }).join('');
 
+        // Delegación de eventos — reemplazamos innerHTML así que reasignar cada vez está OK.
+        container.onclick = (ev) => {
+            const btn = ev.target.closest('[data-action]');
+            if (!btn) return;
+            const action = btn.getAttribute('data-action');
+            if (action === 'chat-suggest') {
+                const q = btn.getAttribute('data-q') || '';
+                const input = document.getElementById('analysis-chat-input');
+                if (input) { input.value = q; input.focus(); }
+                this.sendAnalysisChat();
+            } else if (action === 'chat-retry') {
+                this._retryLastAnalysisChat();
+            }
+        };
+
         container.scrollTop = container.scrollHeight;
+    },
+
+    async _retryLastAnalysisChat() {
+        // Busca la última pregunta del usuario y la reenvía. Removemos la
+        // respuesta anterior (que era el fallback) para que renderAnalysisChat
+        // no muestre dos veces la misma cosa.
+        if (!Array.isArray(this.analysisChat) || !this.analysisChat.length) return;
+        let lastUserIdx = -1;
+        for (let i = this.analysisChat.length - 1; i >= 0; i--) {
+            if (this.analysisChat[i].role === 'user') { lastUserIdx = i; break; }
+        }
+        if (lastUserIdx === -1) return;
+        const lastUser = this.analysisChat[lastUserIdx];
+        // Removemos el fallback anterior + la pregunta original — se van a
+        // reencolar en sendAnalysisChat con el mismo texto.
+        this.analysisChat = this.analysisChat.slice(0, lastUserIdx);
+        const input = document.getElementById('analysis-chat-input');
+        if (input) input.value = lastUser.text;
+        await this.sendAnalysisChat();
     },
 
     async sendAnalysisChat() {
@@ -1387,13 +2462,98 @@ export const audioFlowMixin = {
         if (sendBtn) sendBtn.disabled = true;
         if (input) input.disabled = true;
 
-        const { audioAnalysis, aiAnalysis } = this.currentAnalysis;
+        const { audioAnalysis, aiAnalysis, reliability } = this.currentAnalysis;
         const engine = this.aiEngine || new AIAnalysisEngine();
         // Pasamos historial excluyendo la pregunta recién agregada (se pasa aparte).
         const historyForModel = this.analysisChat.slice(0, -1);
+        // Si el usuario marcó un fragmento en la waveform, se lo pasamos al
+        // motor como focusRegion para que enfoque la respuesta ahí.
+        const focusRegion = this.analysisUserRegion
+            ? { start: Number(this.analysisUserRegion.start) || 0, end: Number(this.analysisUserRegion.end) || 0 }
+            : null;
+        // Contexto rico para el chat — metadata declarada por el pianista,
+        // reliability para que el chat aplique el mismo hedge que el análisis
+        // principal, y memoria de sesiones previas (incluye rejections así el
+        // chat tampoco insiste con observaciones que el usuario ya rechazó).
+        const metadata = this.currentAnalysis.metadata || null;
+        const studentMemory = AIAnalysisEngine.buildStudentMemory(
+            this.analysisHistory || [],
+            { rejections: this.getObservationRejections() },
+        );
+        const chatCtx = { metadata, reliability, studentMemory };
+
+        // Streaming ON por default (dev). Se puede apagar con
+        //   localStorage['pianoStudy.chat.streaming'] = 'off'
+        // por si el usuario quiere el comportamiento viejo temporalmente.
+        const streamingEnabled = (() => {
+            try {
+                const v = localStorage.getItem('pianoStudy.chat.streaming');
+                return v !== 'off';
+            } catch { return true; }
+        })();
+
+        let streamingSucceeded = false;
+        if (streamingEnabled) {
+            try {
+                // Construimos el prompt reutilizando la lógica que ya
+                // hace retrieval + guard de tokens + hedge por reliability.
+                const { systemPrompt, userPrompt } = engine.buildQuestionPrompt(
+                    audioAnalysis, aiAnalysis, question, historyForModel, focusRegion, chatCtx,
+                );
+                const provider = AIAnalysisEngine._getProvider('chat');
+
+                // Se inserta un mensaje asistente vacío que vamos llenando
+                // con los chunks — el render con streaming mueve la sensación
+                // de latencia de "todo o nada" a "el bot está pensando/escribiendo".
+                const idx = this.analysisChat.push({ role: 'assistant', text: '' }) - 1;
+                typingEl?.remove();
+                let rafPending = false;
+                const scheduleRender = () => {
+                    if (rafPending) return;
+                    rafPending = true;
+                    requestAnimationFrame(() => {
+                        rafPending = false;
+                        this.renderAnalysisChat();
+                    });
+                };
+                await streamChat({
+                    provider,
+                    body: {
+                        prompt: userPrompt,
+                        systemPrompt,
+                        temperature: 0.6,
+                        maxTokens: 800,
+                    },
+                    onChunk: (_delta, fullText) => {
+                        this.analysisChat[idx].text = fullText;
+                        scheduleRender();
+                    },
+                    onDone: (fullText) => {
+                        this.analysisChat[idx].text = fullText || this.analysisChat[idx].text;
+                        this.renderAnalysisChat();
+                    },
+                });
+                streamingSucceeded = this.analysisChat[idx]?.text?.length > 0;
+                if (!streamingSucceeded) {
+                    // El stream terminó sin texto — sacamos el mensaje vacío
+                    // y caemos al método no-stream abajo.
+                    this.analysisChat.splice(idx, 1);
+                }
+            } catch (err) {
+                console.warn('Chat streaming falló, uso answerQuestion no-stream:', err?.message || err);
+                // Si dejamos un mensaje vacío del intento fallido, lo removemos.
+                const last = this.analysisChat[this.analysisChat.length - 1];
+                if (last?.role === 'assistant' && !last.text) this.analysisChat.pop();
+            }
+        }
+
         try {
-            const answer = await engine.answerQuestion(audioAnalysis, aiAnalysis, question, historyForModel);
-            this.analysisChat.push({ role: 'assistant', text: String(answer || '') });
+            if (!streamingSucceeded) {
+                const answer = await engine.answerQuestion(
+                    audioAnalysis, aiAnalysis, question, historyForModel, focusRegion, chatCtx,
+                );
+                this.analysisChat.push({ role: 'assistant', text: String(answer || '') });
+            }
         } finally {
             typingEl?.remove();
             if (sendBtn) sendBtn.disabled = false;
@@ -1496,9 +2656,6 @@ export const audioFlowMixin = {
         if (!this.currentAnalysis) return;
 
         const { recordingName, aiAnalysis, audioAnalysis } = this.currentAnalysis;
-        const tempo = Number(audioAnalysis?.tempo?.bpm || audioAnalysis?.tempo || 0);
-        const key = `${audioAnalysis?.key?.key || audioAnalysis?.pitch || '--'} ${audioAnalysis?.key?.scale || ''}`.trim();
-        const dynamic = Number(audioAnalysis?.loudness?.dynamicComplexity || 0);
 
         // Construimos secciones opcionalmente para no dejar títulos vacíos
         // cuando el modelo no devolvió ese campo (igual que la UI, que oculta
@@ -1509,10 +2666,6 @@ export const audioFlowMixin = {
         sections.push('');
         sections.push(`Grabación: ${recordingName || '—'}`);
         sections.push(`Duración: ${(audioAnalysis?.duration || 0).toFixed(1)}s`);
-        sections.push(`Tempo: ${tempo} BPM`);
-        sections.push(`Tonalidad: ${key}`);
-        sections.push(`Complejidad dinámica: ${dynamic.toFixed(2)}`);
-        sections.push(`Puntuación: ${aiAnalysis.overallScore}/10`);
 
         if (aiAnalysis.musicalAnalysis) {
             sections.push('');
@@ -1716,7 +2869,7 @@ export const audioFlowMixin = {
             this.showNotification('Detén la reproducción antes de grabar', 'info');
             return;
         }
-        
+
         if (this.isRecording) {
             this.stopRecording();
         } else {
@@ -1724,9 +2877,126 @@ export const audioFlowMixin = {
         }
     },
 
+    // ─── Fuente de entrada (audio | midi) ────────────────────────────────────
+    // Wirea el selector Audio/MIDI del sección Grabar. Se llama una sola vez
+    // desde bindEvents. El estado vive en this._inputSource ('audio' default).
+    _initInputSourceUi() {
+        if (this._inputSourceUiWired) return;
+        this._inputSourceUiWired = true;
+        this._inputSource = 'audio';
+
+        const radios = document.querySelectorAll('input[name="input-source"]');
+        radios.forEach(r => {
+            r.addEventListener('change', (e) => {
+                if (e.target.checked) this._setInputSource(e.target.value);
+            });
+        });
+
+        document.getElementById('midi-refresh-btn')?.addEventListener('click', () => {
+            this._refreshMidiDevices();
+        });
+    },
+
+    _setInputSource(mode) {
+        this._inputSource = mode === 'midi' ? 'midi' : 'audio';
+        const audioRow = document.getElementById('audio-device-row');
+        const midiRow = document.getElementById('midi-device-row');
+        if (audioRow) audioRow.hidden = this._inputSource === 'midi';
+        if (midiRow) midiRow.hidden = this._inputSource !== 'midi';
+        if (this._inputSource === 'midi') this._refreshMidiDevices();
+    },
+
+    async _refreshMidiDevices() {
+        const select = document.getElementById('midi-device');
+        const statusEl = document.getElementById('midi-status');
+        if (!select) return;
+        try {
+            if (!this._midiRecorder) this._midiRecorder = new MidiRecorder();
+            await this._midiRecorder.requestAccess();
+            const inputs = this._midiRecorder.listInputs();
+            select.innerHTML = inputs.length
+                ? inputs.map(i => `<option value="${escapeHtml(i.id)}">${escapeHtml(i.name)}</option>`).join('')
+                : '<option value="">Ningún teclado detectado</option>';
+            if (statusEl) {
+                statusEl.textContent = inputs.length
+                    ? `${inputs.length} dispositivo${inputs.length > 1 ? 's' : ''} MIDI`
+                    : 'Conectá tu teclado y volvé a pulsar Detectar';
+                statusEl.className = 'midi-status' + (inputs.length ? ' is-ok' : '');
+            }
+        } catch (err) {
+            console.error('Web MIDI access denegado o no soportado:', err);
+            if (statusEl) {
+                statusEl.textContent = 'MIDI no disponible (probá Chrome/Edge)';
+                statusEl.className = 'midi-status is-error';
+            }
+        }
+    },
+
+    async _startMidiRecording() {
+        try {
+            if (!this._midiRecorder) this._midiRecorder = new MidiRecorder();
+            if (!this._midiRecorder.access) await this._midiRecorder.requestAccess();
+            const inputId = document.getElementById('midi-device')?.value || null;
+            this._midiRecorder.startRecording(inputId);
+            this.isRecording = true;
+            this.recordingStartTime = Date.now();
+            document.getElementById('recording-indicator').classList.remove('hidden');
+            this.startRecordingTimer();
+            const recordBtn = document.getElementById('record-btn');
+            recordBtn.classList.add('recording');
+            recordBtn.innerHTML = '<i class="fas fa-stop"></i> Detener';
+            document.getElementById('stop-btn').disabled = false;
+        } catch (err) {
+            console.error('Error iniciando grabación MIDI:', err);
+            this.showNotification(err?.message || 'No pude iniciar la grabación MIDI', 'error');
+        }
+    },
+
+    async _stopMidiRecording() {
+        if (!this._midiRecorder) return;
+        try {
+            const result = await this._midiRecorder.stopRecording();
+            if (!result || !result.blob) {
+                this.showNotification('La grabación MIDI quedó vacía (¿tocaste alguna nota?)', 'info');
+                return;
+            }
+            this.currentRecording = result.blob;
+            const analyzeBtn = document.getElementById('analyze-recording-btn');
+            if (analyzeBtn) analyzeBtn.disabled = false;
+            // Sin waveform: MIDI no es audio, así que ocultamos el review de onda
+            // y mostramos un placeholder informativo.
+            this._hideRecordReview();
+            this._showMidiReviewSummary(result);
+            await this.addToTempRecordings(result.blob, 'midi');
+        } catch (err) {
+            console.error('Error al detener grabación MIDI:', err);
+            this.showNotification('Error al finalizar grabación MIDI', 'error');
+        }
+    },
+
+    _showMidiReviewSummary({ duration, noteCount }) {
+        const review = document.getElementById('record-review');
+        if (!review) return;
+        // Reutilizamos el contenedor de review pero sin WaveSurfer.
+        review.classList.remove('hidden');
+        const waveEl = document.getElementById('record-review-wave');
+        if (waveEl) {
+            waveEl.innerHTML = `<div class="midi-review-placeholder">
+                <i class="fas fa-keyboard"></i>
+                <span>Grabación MIDI · ${noteCount} notas · ${duration.toFixed(1)}s</span>
+            </div>`;
+        }
+    },
+
     async startRecording() {
         // Si viene un review de la grabación anterior, ocultarlo y volver al monitor en vivo.
         this._hideRecordReview();
+
+        // Rama MIDI: captura del teclado por Web MIDI en vez de MediaRecorder.
+        if (this._inputSource === 'midi') {
+            await this._startMidiRecording();
+            return;
+        }
 
         // Si el usuario no activó el mic explícitamente, activarlo aquí para que
         // el visualizador se mueva mientras graba.
@@ -2047,11 +3317,14 @@ export const audioFlowMixin = {
             ? Math.max(0, Math.floor((Date.now() - this.recordingStartTime) / 1000))
             : 0;
 
-        if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+        // Rama MIDI: no hay MediaRecorder que parar, delegamos al recorder MIDI.
+        if (this._inputSource === 'midi') {
+            this._stopMidiRecording();
+        } else if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
             this.mediaRecorder.stop();
             this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
         }
-        
+
         this.isRecording = false;
         
         // Ocultar indicador de grabación
@@ -2105,18 +3378,20 @@ export const audioFlowMixin = {
             duration: r.duration,
             createdAt: r.created_at || null,
             filePath: r.file_path,
+            format: r.format || (String(r.file_path || '').endsWith('.mid') ? 'midi' : 'audio'),
             uploading: false
         }));
         this.updateTempRecordingsList();
     },
 
-    async addToTempRecordings(audioBlob) {
+    async addToTempRecordings(audioBlob, format = 'audio') {
         if (!this.getActiveUsername()) {
             this.updateTempRecordingsList();
             return;
         }
         const duration = Math.floor((Date.now() - this.recordingStartTime) / 1000);
-        const name = `Grabación ${new Date().toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })}`;
+        const kindLabel = format === 'midi' ? 'MIDI' : 'Grabación';
+        const name = `${kindLabel} ${new Date().toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })}`;
 
         // Keep a local blob reference for immediate playback
         const localRec = {
@@ -2125,13 +3400,14 @@ export const audioFlowMixin = {
             blob: audioBlob,
             duration,
             filePath: null,
+            format,
             createdAt: new Date().toISOString(),
             uploading: true
         };
         this.tempRecordings.unshift(localRec);
         this.updateTempRecordingsList();
 
-        const { data, error } = await uploadRecording(audioBlob, name, duration);
+        const { data, error } = await uploadRecording(audioBlob, name, duration, format);
         if (error) {
             console.error('uploadRecording error:', error);
             localRec.uploading = false;
@@ -2149,6 +3425,7 @@ export const audioFlowMixin = {
                 blob: audioBlob,
                 duration: data.duration,
                 filePath: data.file_path,
+                format: data.format || format,
                 createdAt: data.created_at || localRec.createdAt,
                 uploading: false
             };
@@ -2220,32 +3497,35 @@ export const audioFlowMixin = {
         }
 
         container.innerHTML = pageItems.map(recording => {
-            const hasAudio = !!(recording.blob || recording.filePath);
+            const isMidi = recording.format === 'midi'
+                || (recording.filePath && String(recording.filePath).endsWith('.mid'));
+            const hasAudio = !isMidi && !!(recording.blob || recording.filePath);
             const wavePlayer = hasAudio ? `
                 <div class="temp-wave-player">
                     <div class="temp-wave" data-temp-wave-container data-id="${recording.id}"></div>
                     <span class="temp-wave-time" data-temp-wave-time data-id="${recording.id}">0:00 / 0:00</span>
                 </div>` : '';
+            const midiBadge = isMidi ? ' <span class="format-badge format-badge--midi" title="Grabación MIDI"><i class="fas fa-keyboard"></i> MIDI</span>' : '';
             const createdLabel = this._formatCreatedAt(recording.createdAt);
             return `
-            <div class="recording-item${recording.uploading ? ' uploading' : ''}">
+            <div class="recording-item${recording.uploading ? ' uploading' : ''}${isMidi ? ' is-midi' : ''}">
                 <div class="recording-item-header">
                     <div class="recording-info">
-                        <div class="recording-name">${escapeHtml(recording.name)}${recording.uploading ? ' <span class="upload-badge"><i class="fas fa-cloud-upload-alt"></i></span>' : ''}</div>
+                        <div class="recording-name">${escapeHtml(recording.name)}${midiBadge}${recording.uploading ? ' <span class="upload-badge"><i class="fas fa-cloud-upload-alt"></i></span>' : ''}</div>
                         <div class="recording-duration">${this.formatDuration(recording.duration)}</div>
                         ${createdLabel ? `<div class="recording-created"><i class="fas fa-calendar-alt"></i> ${createdLabel}</div>` : ''}
                     </div>
                     <div class="recording-actions">
-                        <button class="btn-small" data-action="temp-play" data-id="${recording.id}" ${!hasAudio ? 'disabled' : ''} title="Reproducir">
+                        <button class="btn-small" data-action="temp-play" data-id="${recording.id}" ${(!hasAudio || isMidi) ? 'disabled' : ''} title="Reproducir">
                             <i class="fas fa-play"></i>
                         </button>
-                        <button class="btn-small" data-action="temp-stop" data-id="${recording.id}" title="Detener">
+                        <button class="btn-small" data-action="temp-stop" data-id="${recording.id}" ${isMidi ? 'disabled' : ''} title="Detener">
                             <i class="fas fa-stop"></i>
                         </button>
-                        <button class="btn-small" data-action="temp-expand" data-id="${recording.id}" ${!hasAudio ? 'disabled' : ''} title="Abrir en el reproductor grande">
+                        <button class="btn-small" data-action="temp-expand" data-id="${recording.id}" ${(!hasAudio || isMidi) ? 'disabled' : ''} title="Abrir en el reproductor grande">
                             <i class="fas fa-expand"></i>
                         </button>
-                        <button class="btn-small" data-action="temp-edit" data-id="${recording.id}" title="Cortar frases">
+                        <button class="btn-small" data-action="temp-edit" data-id="${recording.id}" ${isMidi ? 'disabled' : ''} title="Cortar frases (solo audio)">
                             <i class="fas fa-cut"></i>
                         </button>
                         <button class="btn-small btn-danger" data-action="temp-delete" data-id="${recording.id}" ${recording.uploading ? 'disabled' : ''} title="Eliminar">

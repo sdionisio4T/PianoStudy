@@ -111,21 +111,24 @@ export async function loadRecordingsFromDB() {
     return { data: data || [], error };
 }
 
-export async function uploadRecording(audioBlob, name, duration) {
+export async function uploadRecording(audioBlob, name, duration, format = 'audio') {
     const userId = await getUserId();
     if (!userId) return { data: null, error: new Error('No session') };
 
-    const filePath = `${userId}/${Date.now()}.webm`;
+    const isMidi = format === 'midi';
+    const ext = isMidi ? 'mid' : 'webm';
+    const contentType = isMidi ? 'audio/midi' : 'audio/webm;codecs=opus';
+    const filePath = `${userId}/${Date.now()}.${ext}`;
 
     const { error: uploadError } = await db.storage
         .from('recordings')
-        .upload(filePath, audioBlob, { contentType: 'audio/webm;codecs=opus', upsert: false });
+        .upload(filePath, audioBlob, { contentType, upsert: false });
 
     if (uploadError) return { data: null, error: uploadError };
 
     const { data, error } = await db
         .from('recordings')
-        .insert({ user_id: userId, name, duration, file_path: filePath })
+        .insert({ user_id: userId, name, duration, file_path: filePath, format })
         .select()
         .single();
 

@@ -1,17 +1,13 @@
-// Supabase Edge Function: groq-proxy
-// Proxies requests to Groq (OpenAI-compatible API) to avoid browser CORS
-// limitations. La(s) API key(s) viven solo acá (server-side secret) — el
-// cliente nunca las ve. Requiere JWT de Supabase válido y aplica un rate
-// limit básico por usuario.
+// Supabase Edge Function: openrouter-proxy
+// Proxies requests to OpenRouter (OpenAI-compatible API) to avoid browser
+// CORS y para mantener las API keys server-side. Estructura idéntica a
+// groq-proxy: JWT check, rate limit, doble key con rotación + fallback,
+// soporte de streaming por passthrough SSE.
 //
-// Cambios 2026-08-24:
-// - Soporte para DOS API keys (GROQ_API_KEY + GROQ_API_KEY_2). Alternamos
-//   por request (roundrobin) para duplicar el TPM/RPM efectivo del free
-//   tier. Si la elegida devuelve 429/5xx, reintentamos UNA vez con la otra
-//   antes de responder al cliente. Ver _shared/keyRotation.ts.
-// - Soporte para `stream: true` — passthrough SSE del upstream al cliente.
-//   Cuando stream=true la respuesta ya NO es `{ status, body }` JSON, es
-//   `text/event-stream` directo. El rate-limit se aplica igual.
+// OpenRouter expone catálogo amplio (Claude, Llama, Mistral, Gemma,
+// DeepSeek, GPT-OSS, gratis y pagos). El default `openrouter/auto` deja
+// que OpenRouter elija el mejor modelo disponible; el cliente puede
+// pinear con `model` (ej. 'meta-llama/llama-3.3-70b-instruct:free').
 
 /// <reference lib="deno.ns" />
 
@@ -25,19 +21,40 @@ const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-// Modelo por defecto — groq/compound (alias que Groq resuelve internamente
-// al mejor modelo disponible, hoy 2026-08 va a openai/gpt-oss-120b). Se puede
-// sobreescribir desde el cliente pasando `model`.
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+// SOLO modelos free. `openrouter/auto` NO se usa porque puede rutar a
+// modelos pagos y cobraría contra la key.
 //
-// Política free-only: Groq NO distingue "modelos gratis" de "modelos de pago"
-// a nivel de catálogo — todos los modelos son accesibles con cualquier key,
-// lo que cambia entre tiers ("on_demand" free vs "dev" pago) son los rate
-// limits (TPM/RPM). Con nuestras keys en tier free, cualquier modelo que
-// pidamos es free por construcción. Por eso no hay guard como en gemini/
-// openrouter: no hace falta filtrar acceso, solo estar atentos al TPM cap
-// (8K en 2026-08 para modelos chat en free tier).
-const DEFAULT_MODEL = 'groq/compound';
+// Convención de OpenRouter: los modelos gratuitos llevan sufijo ":free" en
+// el slug (p.ej. "meta-llama/llama-3.3-70b-instruct:free"). Enforced abajo
+// con FREE_ONLY_GUARD — si el cliente pide un modelo sin ":free", se
+// rechaza el request con 400 antes de tocar OpenRouter.
+//
+// Default: dots-studio/dots-3-note-preview:free — uno de los DOS únicos
+// modelos free en OpenRouter (2026-08) que declaran soporte real de
+// structured_outputs / response_format json_object. Sin eso el análisis
+// devuelve chain-of-thought y falla el validador.
+//
+// Historial de intentos fallidos (para no volver a caer en la misma trampa):
+//   - meta-llama/llama-3.3-70b-instruct:free  → 404 (discontinuado)
+//   - nvidia/nemotron-3.5-lightning:free      → ignora JSON mode, chain-of-thought
+//   - thinkingmachines/inkling:free           → 403 (requiere aceptar TML ToS +
+//                                                "solo para agentic harnesses")
+//
+// Catálogo free vigente al 2026-08 (verificado contra /api/v1/models):
+//   - dots-studio/dots-3-note-preview:free    ← default (JSON mode real)
+//   - liquid/lfm-2.5-2.6b:free                (JSON mode real, pero solo 2.6B params)
+//   - thinkingmachines/inkling:free           (403 TML)
+//   - thinkingmachines/inkling-small:free     (mismo TML)
+//   - nvidia/nemotron-3.5-lightning:free      (no JSON)
+//   - poolside/laguna-s-2.1:free              (no JSON)
+const DEFAULT_MODEL = 'dots-studio/dots-3-note-preview:free';
+
+// Enforcement duro: cualquier `model` que no termine en ":free" se rechaza
+// con 400. Es defensa en profundidad — si un cliente futuro (o un bug)
+// pasara un modelo pago por accidente, el proxy no lo deja pasar.
+const FREE_ONLY_GUARD = true;
+const isFreeModel = (m: string) => m.endsWith(':free');
 
 const rateLimiter = createRateLimiter({ limit: 10, windowMs: 60_000 });
 
@@ -109,10 +126,10 @@ Deno.serve(async (req: Request) => {
       : 2000;
 
     const preferredSlot = keySlot === 1 || keySlot === 2 ? keySlot : undefined;
-    const attemptOrder = getKeyAttemptOrder(Deno.env, { prefix: 'GROQ', preferredSlot });
+    const attemptOrder = getKeyAttemptOrder(Deno.env, { prefix: 'OPENROUTER', preferredSlot });
     if (attemptOrder.length === 0) {
       return new Response(
-        JSON.stringify({ error: 'Server misconfigured: missing GROQ_API_KEY[_2]' }),
+        JSON.stringify({ error: 'Server misconfigured: missing OPENROUTER_API_KEY[_2]' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
@@ -123,47 +140,52 @@ Deno.serve(async (req: Request) => {
     }
     messages.push({ role: 'user', content: prompt });
 
+    const requestedModel = typeof model === 'string' && model ? model : DEFAULT_MODEL;
+    if (FREE_ONLY_GUARD && !isFreeModel(requestedModel)) {
+      return new Response(JSON.stringify({
+        error: `OpenRouter proxy solo permite modelos free (sufijo ":free"). Recibido: "${requestedModel}".`,
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     const payload: Record<string, unknown> = {
-      model: typeof model === 'string' && model ? model : DEFAULT_MODEL,
+      model: requestedModel,
       messages,
       temperature: temp,
-      max_completion_tokens: maxTokens,
+      max_tokens: maxTokens,   // OpenRouter usa `max_tokens`, no `max_completion_tokens`
     };
     if (wantsJson) payload.response_format = { type: 'json_object' };
     if (wantsStream) payload.stream = true;
 
-    // Intento con la primera key elegida; si el status es transitorio y hay
-    // segunda key disponible, reintentamos una sola vez con esa. Nunca
-    // reintentamos en modo stream tras haber consumido bytes — si el upstream
-    // empezó a streamear y luego rompió, sería un experimento raro; por
-    // simplicidad hoy, streaming solo intenta con la primera key.
     let lastRes: Response | null = null;
     let usedSlot: 1 | 2 = attemptOrder[0].slot;
 
     for (let i = 0; i < attemptOrder.length; i++) {
       const { key, slot } = attemptOrder[i];
-      const res = await fetch(GROQ_URL, {
+      const res = await fetch(OPENROUTER_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${key}`,
+          // Headers opcionales que OpenRouter usa para atribuir el request
+          // en su leaderboard/analytics. No afectan la respuesta.
+          'HTTP-Referer': 'https://pianostudy.app',
+          'X-Title': 'PianoStudy',
         },
         body: JSON.stringify(payload),
       });
       lastRes = res;
       usedSlot = slot;
 
-      if (wantsStream) break; // en stream no reintentamos (ver comentario arriba)
+      if (wantsStream) break;
       if (res.ok) break;
       if (!TRANSIENT_UPSTREAM_STATUSES.has(res.status)) break;
       if (i === attemptOrder.length - 1) break;
-      // else: seguimos con la próxima key
     }
 
     if (wantsStream && lastRes && lastRes.ok && lastRes.body) {
-      // Passthrough SSE — devolvemos el body del upstream directo, con headers
-      // de SSE + CORS. `X-Key-Slot` viaja en headers para que el cliente
-      // pueda logear cuál key sirvió sin parsear el stream.
       return new Response(lastRes.body, {
         status: 200,
         headers: {
@@ -176,7 +198,6 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    // Modo no-stream (o stream que falló antes de empezar) — envolvemos en JSON.
     const raw = await (lastRes?.text() ?? Promise.resolve(''));
     let body: unknown = raw;
     try { body = JSON.parse(raw); } catch { /* deja como string */ }
