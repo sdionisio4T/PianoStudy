@@ -704,6 +704,94 @@
                             </span>
                         </div>
 
+                        <!-- Recorrido guiado: rail de números a la izquierda + pasos
+                             editoriales a la derecha. El rail es sticky en desktop y
+                             permite saltar entre etapas; los data-step de cada botón
+                             matchean los data-step de las <section> del flujo. -->
+                        <div class="analysis-journey">
+                            <nav class="journey-rail" aria-label="Recorrido de la sesión">
+                                <ol class="journey-rail__list">
+                                    <li><a class="journey-rail__step" data-rail-step="1" href="#" aria-label="Ir a Tu percepción"><span class="journey-rail__num">01</span><span class="journey-rail__label">Percepción</span></a></li>
+                                    <li><a class="journey-rail__step" data-rail-step="2" href="#" aria-label="Ir a Lo que encontramos"><span class="journey-rail__num">02</span><span class="journey-rail__label">Evidencia</span></a></li>
+                                    <li><a class="journey-rail__step" data-rail-step="3" href="#" aria-label="Ir a Hallazgo principal"><span class="journey-rail__num">03</span><span class="journey-rail__label">Hallazgo</span></a></li>
+                                    <li><a class="journey-rail__step" data-rail-step="4" href="#" aria-label="Ir a Reflexión"><span class="journey-rail__num">04</span><span class="journey-rail__label">Reflexión</span></a></li>
+                                    <li><a class="journey-rail__step" data-rail-step="5" href="#" aria-label="Ir a Probemos algo"><span class="journey-rail__num">05</span><span class="journey-rail__label">Experimento</span></a></li>
+                                    <li><a class="journey-rail__step" data-rail-step="6" href="#" aria-label="Ir a Después de practicar"><span class="journey-rail__num">06</span><span class="journey-rail__label">Después</span></a></li>
+                                    <li><a class="journey-rail__step" data-rail-step="7" href="#" aria-label="Ir a Antes vs después"><span class="journey-rail__num">07</span><span class="journey-rail__label">A / B</span></a></li>
+                                    <li><a class="journey-rail__step" data-rail-step="8" href="#" aria-label="Ir a Observaciones detalladas"><span class="journey-rail__num">08</span><span class="journey-rail__label">Detalles</span></a></li>
+                                    <li><a class="journey-rail__step" data-rail-step="9" href="#" aria-label="Ir a Próximo paso"><span class="journey-rail__num">09</span><span class="journey-rail__label">Próximo</span></a></li>
+                                </ol>
+                            </nav>
+
+                            <!-- Panel "Explorar" UNIFICADO: reproductor + chat NeuralJam en
+                                 un solo card. Vive DENTRO de .analysis-journey, entre el
+                                 rail/pager y el contenido de los pasos — así siempre está a
+                                 mano al leer cualquier paso, sin bajar a otra sección.
+                                 Los IDs internos (analysis-wavesurfer, analysis-play-btn,
+                                 analysis-chat-*) no cambian; el JS no se toca. -->
+                            <section class="analysis-explore">
+                                <header class="analysis-explore__header">
+                                    <span class="analysis-explore__label">
+                                        <i class="fas fa-headphones"></i>
+                                        Explorá tu grabación
+                                    </span>
+                                    <span class="analysis-explore__hint">Click en una región para saltar · arrastrá sobre la onda para seleccionar un fragmento · después preguntá.</span>
+                                </header>
+
+                                <div class="analysis-explore__player" id="analysis-player-dock">
+                                    <div id="analysis-wavesurfer" class="analysis-wavesurfer"></div>
+                                    <div id="analysis-wavesurfer-timeline" class="analysis-wavesurfer-timeline"></div>
+                                    <div class="analysis-transport">
+                                        <button id="analysis-play-btn" class="btn-secondary">
+                                            <i class="fas fa-play"></i>
+                                            <span data-role="analysis-play-label">Play</span>
+                                        </button>
+                                        <button id="analysis-play-region-btn" class="btn-secondary" hidden>
+                                            <i class="fas fa-repeat"></i> Loop fragmento
+                                        </button>
+                                        <button id="analysis-clear-region-btn" class="btn-secondary" hidden>
+                                            <i class="fas fa-xmark"></i> Limpiar
+                                        </button>
+                                        <span id="analysis-time-label" class="analysis-time-label">0:00.00 / 0:00.00</span>
+                                        <span id="analysis-moment-note" class="analysis-moment-note"></span>
+                                    </div>
+                                    <div class="waveform-legend">
+                                        <span class="legend-item"><span class="legend-color good"></span> Bien</span>
+                                        <span class="legend-item"><span class="legend-color improve"></span> A mejorar</span>
+                                        <span class="legend-item"><span class="legend-color neutral"></span> Neutral</span>
+                                        <span class="legend-item"><span class="legend-color user"></span> Tu selección</span>
+                                    </div>
+                                </div>
+
+                                <details class="analysis-explore__chat analysis-chat-details">
+                                    <summary class="analysis-chat-summary">
+                                        <span class="analysis-chat-summary__prompt">
+                                            <span class="neuraljam-orb" aria-hidden="true"></span>
+                                            <span class="analysis-chat-summary__title">¿Querés profundizar?</span>
+                                            <span class="analysis-chat-summary__cta">Pregúntale a NeuralJam</span>
+                                        </span>
+                                        <i class="fas fa-chevron-down analysis-chat-summary__chevron" aria-hidden="true"></i>
+                                    </summary>
+                                    <div class="analysis-chat">
+                                        <div id="analysis-chat-messages" class="chat-messages"></div>
+                                        <div id="analysis-chat-focus-chip" class="analysis-chat-focus-chip" hidden>
+                                            <i class="fas fa-crosshairs"></i>
+                                            <span>Preguntando sobre el fragmento <strong data-role="focus-range">0:00 – 0:00</strong></span>
+                                            <button type="button" class="focus-chip-clear" aria-label="Quitar fragmento">
+                                                <i class="fas fa-xmark"></i>
+                                            </button>
+                                        </div>
+                                        <div class="chat-input-row">
+                                            <textarea id="analysis-chat-input" rows="2" placeholder="Ej: ¿En qué partes me fui de tempo y cómo lo practico?"></textarea>
+                                            <button id="analysis-chat-send" class="btn-primary">
+                                                <i class="fas fa-paper-plane"></i> Enviar
+                                            </button>
+                                        </div>
+                                        <p class="chat-hint">Privacidad: no se envía tu audio. Solo métricas numéricas y tu pregunta.</p>
+                                    </div>
+                                </details>
+                            </section>
+
                         <div class="analysis-flow">
                             <!-- 01 · TU PERCEPCIÓN
                                  Se rellena desde currentAnalysis.selfEvaluation (rating,
@@ -736,29 +824,9 @@
                                     </div>
                                 </header>
                                 <div class="flow-step__body">
-                                    <p class="analysis-hint">Cada región marca un momento que identificó la IA. Verde = bien; naranja = a mejorar; gris = neutral. Click en una región para saltar ahí. <strong>Arrastrá sobre la onda</strong> para marcar tu propio fragmento (azul) y preguntarle a NeuralJam por ese pasaje.</p>
-                                    <div id="analysis-wavesurfer" class="analysis-wavesurfer"></div>
-                                    <div id="analysis-wavesurfer-timeline" class="analysis-wavesurfer-timeline"></div>
-                                    <div class="analysis-transport">
-                                        <button id="analysis-play-btn" class="btn-secondary">
-                                            <i class="fas fa-play"></i>
-                                            <span data-role="analysis-play-label">Play</span>
-                                        </button>
-                                        <button id="analysis-play-region-btn" class="btn-secondary" hidden>
-                                            <i class="fas fa-repeat"></i> Loop fragmento
-                                        </button>
-                                        <button id="analysis-clear-region-btn" class="btn-secondary" hidden>
-                                            <i class="fas fa-xmark"></i> Limpiar
-                                        </button>
-                                        <span id="analysis-time-label" class="analysis-time-label">0:00.00 / 0:00.00</span>
-                                        <span id="analysis-moment-note" class="analysis-moment-note"></span>
-                                    </div>
-                                    <div class="waveform-legend">
-                                        <span class="legend-item"><span class="legend-color good"></span> Bien</span>
-                                        <span class="legend-item"><span class="legend-color improve"></span> A mejorar</span>
-                                        <span class="legend-item"><span class="legend-color neutral"></span> Neutral</span>
-                                        <span class="legend-item"><span class="legend-color user"></span> Tu selección</span>
-                                    </div>
+                                    <!-- Nota: el reproductor waveform + transporte + leyenda vive
+                                         fuera del paso 02 (arriba del chat) para que esté siempre
+                                         accesible sin cambiar de pestaña. Ver #analysis-player-dock. -->
 
                                     <!-- Análisis musical en prosa (rellenado por displayAnalysisResults) -->
                                     <div class="analysis-content flow-step__prose" id="musical-analysis"></div>
@@ -941,31 +1009,11 @@
                                 </div>
                             </section>
                         </div>
+                        </div><!-- /.analysis-journey -->
 
                         <!-- Secciones secundarias — separadas del recorrido principal
                              para que el chat y las acciones no compitan con la narrativa. -->
                         <div class="analysis-secondary">
-                            <div class="analysis-secondary__block">
-                                <h3 class="analysis-secondary__title"><span class="neuraljam-orb" aria-hidden="true"></span> Pregúntale a NeuralJam</h3>
-                                <div class="analysis-chat">
-                                    <div id="analysis-chat-messages" class="chat-messages"></div>
-                                    <div id="analysis-chat-focus-chip" class="analysis-chat-focus-chip" hidden>
-                                        <i class="fas fa-crosshairs"></i>
-                                        <span>Preguntando sobre el fragmento <strong data-role="focus-range">0:00 – 0:00</strong></span>
-                                        <button type="button" class="focus-chip-clear" aria-label="Quitar fragmento">
-                                            <i class="fas fa-xmark"></i>
-                                        </button>
-                                    </div>
-                                    <div class="chat-input-row">
-                                        <textarea id="analysis-chat-input" rows="2" placeholder="Ej: ¿En qué partes me fui de tempo y cómo lo practico?"></textarea>
-                                        <button id="analysis-chat-send" class="btn-primary">
-                                            <i class="fas fa-paper-plane"></i> Enviar
-                                        </button>
-                                    </div>
-                                    <p class="chat-hint">Privacidad: no se envía tu audio. Solo métricas numéricas y tu pregunta.</p>
-                                </div>
-                            </div>
-
                             <div class="analysis-actions">
                                 <button id="save-analysis-btn" class="btn-primary">
                                     <i class="fas fa-save"></i> Guardar Análisis

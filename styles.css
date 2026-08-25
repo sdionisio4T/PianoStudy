@@ -2476,6 +2476,9 @@
 }
 
 .analysis-wavesurfer-timeline {
+    /* TimelinePlugin removido — el contenedor queda vacío y sin ocupar espacio.
+       Si vuelve el plugin, quitar el display:none. */
+    display: none;
     width: 100%;
     color: var(--text-secondary);
     margin-top: 0.3rem;
@@ -7787,4 +7790,1046 @@ button,
 .ab-compare__btn--danger:hover {
     color: var(--accent-red);
     border-color: var(--accent-red);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ITERACIÓN VISUAL — RECORRIDO EDITORIAL DEL FEEDBACK
+   ═══════════════════════════════════════════════════════════════════════════
+
+   Objetivo: convertir la pila de 9 cards iguales en una experiencia de estudio
+   guiada con jerarquía real. Este bloque se agrega al final (mayor
+   especificidad que las reglas de arriba con igual selector) y solo cambia
+   PRESENTACIÓN — no toca IDs, ni marca DOM más allá del rail agregado en
+   index.html. Puede quitarse el bloque completo y la app sigue funcionando
+   con el diseño anterior.
+   ─────────────────────────────────────────────────────────────────────── */
+
+/* ── Layout del recorrido: rail horizontal arriba + contenido tipo pestañas
+   ────────────────────────────────────────────────────────────────────────
+   El feedback funciona como un slider de páginas: solo un paso visible a
+   la vez, se navega por los números de arriba (pestañas). Cada pestaña
+   lleva el número + label completo. Los pasos con .hidden (renderer no
+   encontró contenido) se saltan automáticamente. */
+.analysis-journey {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    margin-top: 0.5rem;
+}
+/* Un poco más de aire entre el pager (top) y el contenido del paso. */
+.analysis-journey > .analysis-flow {
+    margin-top: 0.6rem;
+}
+
+.journey-rail {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background:
+        linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--bg-secondary) 82%, transparent) 0%,
+            color-mix(in srgb, var(--bg-secondary) 65%, transparent) 100%
+        );
+    backdrop-filter: blur(10px) saturate(140%);
+    -webkit-backdrop-filter: blur(10px) saturate(140%);
+    padding: 0.65rem 0.75rem;
+    margin: 0;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 14px;
+    box-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.04) inset,
+        0 6px 20px rgba(0, 0, 0, 0.2);
+}
+.journey-rail__list {
+    list-style: none;
+    margin: 0;
+    padding: 0.15rem 0.35rem;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: nowrap;
+    gap: 0.4rem;
+    overflow-x: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,0.12) transparent;
+}
+.journey-rail__list::-webkit-scrollbar { height: 4px; }
+.journey-rail__list::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.12);
+    border-radius: 999px;
+}
+/* Móvil: snap para que las pastillas queden centradas al hacer scroll. */
+@media (max-width: 720px) {
+    .journey-rail__list { justify-content: flex-start; scroll-snap-type: x proximity; }
+    .journey-rail__step { scroll-snap-align: center; }
+}
+
+.journey-rail__step {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.82rem;
+    line-height: 1;
+    letter-spacing: 0.005em;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    background: transparent;
+    transition: color 0.2s ease, background 0.2s ease, border-color 0.2s ease, padding 0.2s ease;
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+.journey-rail__step .journey-rail__num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--bg-tertiary);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.04em;
+    flex: 0 0 auto;
+    transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+/* Label oculto por defecto; solo el paso activo lo despliega. Así las 9
+   pastillas caben en una sola línea aun en pantallas medianas. */
+.journey-rail__step .journey-rail__label {
+    max-width: 0;
+    overflow: hidden;
+    opacity: 0;
+    color: var(--text-secondary);
+    font-weight: 500;
+    white-space: nowrap;
+    transition: max-width 0.24s ease, opacity 0.18s ease, color 0.18s ease, padding 0.18s ease;
+}
+.journey-rail__step:hover .journey-rail__num {
+    color: var(--text-primary);
+    border-color: rgba(255, 255, 255, 0.22);
+    background: var(--bg-secondary);
+}
+.journey-rail__step.is-active {
+    background: color-mix(in srgb, var(--rail-accent, var(--accent-blue)) 12%, transparent);
+    border-color: color-mix(in srgb, var(--rail-accent, var(--accent-blue)) 40%, transparent);
+    padding-right: 0.9rem;
+}
+.journey-rail__step.is-active .journey-rail__num {
+    color: var(--rail-accent, var(--accent-blue));
+    border-color: var(--rail-accent, var(--accent-blue));
+    background: color-mix(in srgb, var(--rail-accent, var(--accent-blue)) 22%, var(--bg-secondary));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--rail-accent, var(--accent-blue)) 12%, transparent);
+}
+.journey-rail__step.is-active .journey-rail__label {
+    max-width: 12rem;
+    opacity: 1;
+    padding-left: 0.15rem;
+    color: var(--text-primary);
+    font-weight: 600;
+}
+@media (max-width: 720px) {
+    /* En móvil dejamos labels solo en activo también, para poder ver 3-4 pills. */
+    .journey-rail__step { padding: 0.3rem 0.4rem; }
+    .journey-rail__step .journey-rail__num { width: 30px; height: 30px; }
+    .journey-rail__step.is-active .journey-rail__label { max-width: 9rem; }
+}
+
+/* Un paso cuya sección está oculta (renderer sin datos) sale del rail. */
+.journey-rail__list > li.is-hidden,
+.journey-rail__step.is-hidden { display: none; }
+
+/* Pastilla deshabilitada: se ve pero atenuada. Al clickearla, el pager
+   muestra la razón por la que ese paso no tiene datos. */
+.journey-rail__step.is-disabled {
+    opacity: 0.42;
+    cursor: help;
+}
+.journey-rail__step.is-disabled:hover {
+    opacity: 0.65;
+    background: transparent;
+}
+.journey-rail__step.is-disabled .journey-rail__num {
+    background: transparent;
+    border-style: dashed;
+    border-color: rgba(255, 255, 255, 0.14);
+    color: var(--text-secondary);
+    box-shadow: none;
+}
+.journey-rail__step.is-disabled:hover .journey-rail__num {
+    color: var(--text-secondary);
+    border-color: rgba(255, 255, 255, 0.22);
+    background: transparent;
+}
+
+/* Pager mostrando la razón de un paso deshabilitado. Cambia sutilmente
+   de estilo para que el usuario note que es un mensaje informativo, no
+   el paso activo real. Se auto-restaura después de ~3s. */
+.journey-pager.is-showing-reason {
+    background:
+        linear-gradient(
+            180deg,
+            rgba(255, 214, 10, 0.08) 0%,
+            var(--bg-secondary) 100%
+        );
+    border-color: rgba(255, 214, 10, 0.35);
+}
+.journey-pager.is-showing-reason .journey-pager__indicator strong {
+    background: rgba(255, 214, 10, 0.18);
+    border-color: rgba(255, 214, 10, 0.5);
+    color: #ffd60a;
+}
+.journey-pager.is-showing-reason .journey-pager__title {
+    color: var(--text-secondary);
+    font-style: italic;
+    font-weight: 400;
+    max-width: 30rem;
+    white-space: normal;
+    line-height: 1.35;
+}
+
+/* Barra inferior (Anterior · Paso NN · Título · Siguiente) — controles
+   principales de navegación entre pestañas del análisis. */
+.journey-pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-top: 0;
+    padding: 0.7rem 1rem;
+    position: sticky;
+    top: 3.6rem; /* justo debajo del rail sticky */
+    z-index: 4;
+    background:
+        linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--pager-accent, var(--accent-blue)) 4%, var(--bg-secondary)) 0%,
+            var(--bg-secondary) 100%
+        );
+    border: 1px solid color-mix(in srgb, var(--pager-accent, var(--accent-blue)) 20%, var(--border-color));
+    border-radius: 14px;
+    box-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.03) inset,
+        0 6px 20px rgba(0, 0, 0, 0.22);
+    transition: background 0.24s ease, border-color 0.24s ease;
+}
+.journey-pager__btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.65rem 1.1rem;
+    background: color-mix(in srgb, var(--accent-blue) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent-blue) 45%, transparent);
+    border-radius: 10px;
+    color: var(--accent-blue);
+    font-size: 0.9rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    transition: background 0.18s, border-color 0.18s, color 0.18s, transform 0.12s;
+    min-height: 40px;
+}
+.journey-pager__btn i { font-size: 0.8rem; }
+.journey-pager__btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent-blue) 22%, transparent);
+    border-color: var(--accent-blue);
+    color: var(--text-primary);
+}
+.journey-pager__btn:active:not(:disabled) { transform: translateY(1px); }
+.journey-pager__btn:disabled {
+    opacity: 0.28;
+    cursor: not-allowed;
+    background: transparent;
+    color: var(--text-secondary);
+    border-color: rgba(255, 255, 255, 0.08);
+}
+.journey-pager__indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+    min-width: 0;
+    flex: 1;
+    justify-content: center;
+}
+.journey-pager__indicator strong {
+    color: var(--text-primary);
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    font-size: 0.85rem;
+    background: color-mix(in srgb, var(--pager-accent, var(--accent-blue)) 18%, transparent);
+    color: var(--pager-accent, var(--accent-blue));
+    padding: 0.2rem 0.55rem;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--pager-accent, var(--accent-blue)) 40%, transparent);
+}
+.journey-pager__title {
+    color: var(--text-primary);
+    font-weight: 500;
+    letter-spacing: -0.005em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 22rem;
+}
+@media (max-width: 640px) {
+    .journey-pager { padding: 0.75rem 0.85rem; gap: 0.6rem; }
+    .journey-pager__btn { padding: 0.55rem 0.75rem; font-size: 0.85rem; }
+    .journey-pager__btn span { display: none; }
+    .journey-pager__btn i { font-size: 0.9rem; }
+    .journey-pager__title { max-width: 10rem; font-size: 0.85rem; }
+    .journey-pager__indicator { font-size: 0.82rem; gap: 0.4rem; }
+}
+
+/* ── Modo pestañas: cada paso define su altura, pager pegado abajo ──
+   Sin altura fija en el contenedor — el paso activo determina el alto
+   y el pager queda inmediatamente debajo (no más espacios vacíos). El
+   marco es idéntico para todos los pasos, solo cambia el color del
+   `--step-accent` en el border-left. */
+.analysis-flow {
+    display: block;
+    position: relative;
+    gap: 0;
+    /* Sin min-height — cada paso define su altura al contenido. */
+}
+.analysis-flow > .flow-step {
+    /* Marco unificado — moderno, con degradado sutil que toma el acento
+       del paso y borde translúcido más suave que un card plano. */
+    background:
+        radial-gradient(
+            ellipse 90% 100% at 0% 0%,
+            color-mix(in srgb, var(--step-accent) 6%, transparent) 0%,
+            transparent 55%
+        ),
+        linear-gradient(
+            160deg,
+            color-mix(in srgb, var(--step-accent) 3%, var(--bg-secondary)) 0%,
+            var(--bg-secondary) 45%,
+            color-mix(in srgb, var(--bg-primary) 30%, var(--bg-secondary)) 100%
+        );
+    border: 1px solid color-mix(in srgb, var(--step-accent) 18%, var(--border-color));
+    border-left: 3px solid var(--step-accent);
+    border-radius: 16px;
+    padding: 1.5rem 1.75rem 1.75rem;
+    box-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.03) inset,
+        0 8px 28px rgba(0, 0, 0, 0.28),
+        0 0 0 1px rgba(255, 255, 255, 0.015);
+    display: none;
+    flex-direction: column;
+    margin: 0;
+    max-width: none;
+    /* min-height fuera — que la card sea del tamaño del contenido. */
+}
+.analysis-flow > .flow-step.is-current {
+    display: flex;
+    animation: flowStepPageIn 220ms ease-out both;
+}
+.analysis-flow > .flow-step.hidden { display: none !important; }
+.analysis-flow > .flow-step .flow-step__body { flex: 1; }
+
+@keyframes flowStepPageIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .analysis-flow > .flow-step.is-current { animation: none; }
+}
+
+/* Neutralizar variantes por paso que agregaban border/background/padding
+   distinto — el marco ahora es igual para todos, con el mismo degradado
+   moderno. Solo cambia el color del `--step-accent` via el border-left. */
+.analysis-flow > .flow-step[data-step],
+.analysis-flow > .flow-step[data-step].analysis-next-goal,
+.analysis-flow > .flow-step[data-step].analysis-metaq-section {
+    border-radius: 16px;
+    background:
+        radial-gradient(
+            ellipse 90% 100% at 0% 0%,
+            color-mix(in srgb, var(--step-accent) 6%, transparent) 0%,
+            transparent 55%
+        ),
+        linear-gradient(
+            160deg,
+            color-mix(in srgb, var(--step-accent) 3%, var(--bg-secondary)) 0%,
+            var(--bg-secondary) 45%,
+            color-mix(in srgb, var(--bg-primary) 30%, var(--bg-secondary)) 100%
+        );
+    border-top: 1px solid color-mix(in srgb, var(--step-accent) 18%, var(--border-color));
+    border-right: 1px solid color-mix(in srgb, var(--step-accent) 18%, var(--border-color));
+    border-bottom: 1px solid color-mix(in srgb, var(--step-accent) 18%, var(--border-color));
+    border-left: 3px solid var(--step-accent);
+    padding: 1.5rem 1.75rem 1.75rem;
+    margin: 0;
+    max-width: none;
+}
+
+/* El paso 6 (colapsable) tenía padding 0; le devolvemos el uniforme. */
+.analysis-flow > .flow-step--detail { padding: 1.5rem 1.75rem 1.75rem; }
+.analysis-flow > .flow-step--detail .flow-step__details > summary {
+    padding: 0 0 1rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    margin-bottom: 1rem;
+}
+.analysis-flow > .flow-step--detail .flow-step__details > .flow-step__body {
+    padding: 0;
+    border-top: none;
+}
+
+/* Colores del rail por paso — matchean los acentos de .flow-step[data-step]. */
+.journey-rail__step[data-rail-step="1"] { --rail-accent: #4ec4ff; }
+.journey-rail__step[data-rail-step="2"] { --rail-accent: #a970ff; }
+.journey-rail__step[data-rail-step="3"] { --rail-accent: var(--accent-orange); }
+.journey-rail__step[data-rail-step="4"] { --rail-accent: #ffd60a; }
+.journey-rail__step[data-rail-step="5"] { --rail-accent: var(--accent-green); }
+.journey-rail__step[data-rail-step="6"] { --rail-accent: #38e8b8; }
+.journey-rail__step[data-rail-step="7"] { --rail-accent: #a970ff; }
+.journey-rail__step[data-rail-step="8"] { --rail-accent: #4ec4ff; }
+.journey-rail__step[data-rail-step="9"] { --rail-accent: #ff5b8a; }
+
+/* ── Composición editorial del flujo ─────────────────────────────────── */
+
+/* Más aire entre pasos: cada uno respira como una sección editorial. */
+.analysis-flow {
+    gap: 2.75rem;
+}
+
+/* Reset: por defecto los pasos ya NO son cards — son contenido sobre el
+   fondo. Sólo algunos pasos vuelven a tener card (ver más abajo). */
+.flow-step {
+    background: transparent;
+    border: none;
+    border-left: none;
+    border-radius: 0;
+    padding: 0;
+    box-shadow: none;
+}
+
+/* Header más discreto: el número se convierte en un tag pequeño en línea
+   con el eyebrow, en vez de la píldora gigante. En mobile queda visible
+   como ancla; en desktop se vuelve redundante con el rail pero no molesta. */
+.flow-step__header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    margin-bottom: 0.85rem;
+}
+.flow-step__number {
+    min-width: 0;
+    width: auto;
+    height: auto;
+    padding: 0;
+    background: transparent;
+    color: color-mix(in srgb, var(--step-accent) 85%, transparent);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    border-radius: 0;
+}
+.flow-step__titles { display: flex; flex-direction: column; gap: 0.05rem; }
+.flow-step__eyebrow {
+    margin: 0;
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+}
+.flow-step__title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+}
+
+/* El número in-line del header queda oculto siempre: el rail horizontal
+   arriba ya muestra el número + label de forma más rica. */
+.flow-step__number { display: none; }
+.flow-step__header { gap: 0; }
+
+/* ── Paso 01 · Percepción — compacto, sin card ─────────────────────── */
+.flow-step[data-step="1"] .flow-step__body > * + * { margin-top: 0.6rem; }
+.perception-prediction {
+    border-left-width: 2px;
+    background: transparent;
+    padding: 0.25rem 0 0.25rem 0.9rem;
+    color: var(--text-primary);
+    font-size: 1.05rem;
+    font-style: italic;
+    line-height: 1.55;
+}
+.analysis-perception__caption {
+    border-top: none;
+    padding-top: 0;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+}
+
+/* ── Paso 02 · Evidencia — card ancha, waveform con peso ──────────── */
+.flow-step[data-step="2"] {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--step-accent);
+    border-radius: 14px;
+    padding: 1.6rem 1.75rem 1.75rem;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.2);
+}
+.flow-step[data-step="2"] .analysis-hint {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    background: transparent;
+    padding: 0;
+    border: none;
+    margin-bottom: 0.6rem;
+}
+.flow-step[data-step="2"] #analysis-wavesurfer {
+    min-height: 140px;
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 8px;
+    padding: 0.4rem 0.5rem;
+}
+.flow-step[data-step="2"] .analysis-transport {
+    margin-top: 0.6rem;
+}
+.flow-step[data-step="2"] .waveform-legend {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px dashed rgba(255, 255, 255, 0.06);
+}
+.flow-step[data-step="2"] .analysis-content.flow-step__prose {
+    margin-top: 1.25rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* "Tu oído vs los datos" — bloque puente: cita + verdict */
+.flow-step[data-step="2"] .analysis-belief-section {
+    margin-top: 1.25rem;
+    padding: 1rem 1.15rem;
+    background: color-mix(in srgb, var(--accent-orange) 8%, transparent);
+    border: none;
+    border-left: 3px solid var(--accent-orange);
+    border-radius: 0 8px 8px 0;
+}
+
+/* ── Paso 03 · Hallazgo principal — momento visual más fuerte ─────── */
+.flow-step[data-step="3"] {
+    padding: 0.75rem 0 0.5rem;
+}
+.flow-step[data-step="3"] .flow-step__header {
+    margin-bottom: 1rem;
+}
+.flow-step[data-step="3"] .analysis-primary-focus__text {
+    font-size: clamp(1.4rem, 2.2vw, 1.85rem);
+    font-weight: 500;
+    line-height: 1.32;
+    letter-spacing: -0.015em;
+    color: var(--text-primary);
+    max-width: 32em;
+}
+.flow-step[data-step="3"] .analysis-strengths-block {
+    margin-top: 1.5rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    max-width: 40em;
+}
+.analysis-strengths-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+.analysis-strength-item {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    color: var(--text-primary);
+    font-size: 0.98rem;
+    line-height: 1.5;
+}
+.analysis-strength-item i {
+    color: var(--accent-green);
+    font-size: 0.85rem;
+    flex: 0 0 auto;
+}
+
+/* ── Paso 04 · Reflexión — pausa pedagógica, abierta ─────────────── */
+.flow-step[data-step="4"] {
+    background: transparent;
+    border: none;
+    padding: 0.5rem 0;
+    max-width: 40em;
+}
+.flow-step[data-step="4"] .flow-step__header { margin-bottom: 0.65rem; }
+.flow-step[data-step="4"] .analysis-metaq__text {
+    margin: 0;
+    padding: 0.35rem 0 0.35rem 1rem;
+    border-left: 2px solid #ffd60a;
+    background: none;
+    font-size: 1.15rem;
+    line-height: 1.5;
+    font-style: italic;
+    color: var(--text-primary);
+}
+.flow-step[data-step="4"] .analysis-metaq__text::before { display: none; }
+
+/* ── Paso 05 · Probemos algo — card + layout horizontal en desktop ── */
+.flow-step[data-step="5"] {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--step-accent);
+    border-radius: 14px;
+    padding: 1.6rem 1.75rem 1.75rem;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.18);
+}
+.flow-step[data-step="5"] .suggestion-card {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+}
+.flow-step[data-step="5"] .suggestion-title {
+    color: var(--text-primary);
+    font-size: 1.15rem;
+    font-weight: 600;
+    gap: 0.6rem;
+    margin-bottom: 1rem;
+}
+.flow-step[data-step="5"] .suggestion-title i {
+    color: var(--step-accent);
+    font-size: 0.9rem;
+}
+.flow-step[data-step="5"] .suggestion-duration {
+    background: color-mix(in srgb, var(--step-accent) 14%, transparent);
+    color: var(--step-accent);
+    border: 1px solid color-mix(in srgb, var(--step-accent) 40%, transparent);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+.flow-step[data-step="5"] .exercise-steps__label,
+.flow-step[data-step="5"] .exercise-check__label {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-secondary);
+    margin-bottom: 0.5rem;
+}
+.flow-step[data-step="5"] .exercise-steps__list {
+    counter-reset: exercise-step;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+}
+.flow-step[data-step="5"] .exercise-steps__list > li {
+    counter-increment: exercise-step;
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    color: var(--text-primary);
+    line-height: 1.5;
+    padding: 0.15rem 0;
+}
+.flow-step[data-step="5"] .exercise-steps__list > li::before {
+    content: "0" counter(exercise-step);
+    font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--step-accent);
+    letter-spacing: 0.06em;
+    flex: 0 0 auto;
+    min-width: 2ch;
+}
+.flow-step[data-step="5"] .exercise-check {
+    margin-top: 1.15rem;
+    padding: 0.9rem 1rem;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 8px;
+    border-left: 2px solid var(--step-accent);
+}
+.flow-step[data-step="5"] .exercise-check__question {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 0.95rem;
+    line-height: 1.5;
+    font-style: italic;
+}
+
+@media (min-width: 720px) {
+    /* En desktop la card del experimento se divide en dos columnas:
+       pasos (izquierda) y qué comprobar (derecha). Cuando no hay check
+       la primera columna ocupa todo. */
+    .flow-step[data-step="5"] .suggestion-card:has(.exercise-check) {
+        display: grid;
+        grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+        gap: 1.75rem;
+        align-items: start;
+    }
+    .flow-step[data-step="5"] .suggestion-card:has(.exercise-check) .suggestion-title {
+        grid-column: 1 / -1;
+    }
+    .flow-step[data-step="5"] .suggestion-card:has(.exercise-check) .exercise-check {
+        margin-top: 0;
+        align-self: stretch;
+    }
+}
+
+/* ── Paso 06 · Después de practicar — sin card, sólo divisor arriba ── */
+.flow-step[data-step="6"] {
+    background: transparent;
+    border: none;
+    padding: 1.5rem 0 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    max-width: 48em;
+}
+
+/* ── Paso 07 · A/B — card discreta, dos columnas ya nativas ──────── */
+.flow-step[data-step="7"] {
+    background: color-mix(in srgb, #a970ff 4%, var(--bg-secondary));
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--step-accent);
+    border-radius: 14px;
+    padding: 1.5rem 1.5rem 1.6rem;
+}
+
+/* ── Paso 08 · Observaciones — colapsable ya existente, más discreto ── */
+.flow-step[data-step="8"] {
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 10px;
+    padding: 0;
+    max-width: 48em;
+}
+.flow-step[data-step="8"] .flow-step__details > summary {
+    padding: 0.85rem 1.15rem;
+}
+.flow-step[data-step="8"] .flow-step__details[open] > summary {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* ── Paso 09 · Próximo paso — cierre editorial ───────────────────
+   Selector doble (`.flow-step[data-step="9"].analysis-next-goal`) para
+   ganar en especificidad a la regla original que fijaba padding-left. */
+.flow-step[data-step="9"],
+.flow-step[data-step="9"].analysis-next-goal {
+    background: transparent;
+    border: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 1.75rem 0 0.5rem;
+    margin-top: 1rem;
+    max-width: 44em;
+}
+.flow-step[data-step="9"] .flow-step__header { margin-bottom: 0.85rem; }
+.flow-step[data-step="9"] .analysis-next-goal__text {
+    font-size: 1.2rem;
+    line-height: 1.5;
+    font-weight: 500;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+/* ── Chat NeuralJam colapsable ─────────────────────────────────── */
+.analysis-chat-details {
+    padding: 0;
+    overflow: hidden;
+}
+.analysis-chat-summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 1rem 1.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    transition: background 0.15s;
+}
+.analysis-chat-summary::-webkit-details-marker { display: none; }
+.analysis-chat-summary:hover { background: rgba(255, 255, 255, 0.02); }
+.analysis-chat-summary__prompt {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+.analysis-chat-summary__title {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 0.98rem;
+}
+.analysis-chat-summary__cta {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+.analysis-chat-summary__chevron {
+    color: var(--text-secondary);
+    transition: transform 0.2s ease;
+}
+.analysis-chat-details[open] .analysis-chat-summary__chevron {
+    transform: rotate(180deg);
+}
+.analysis-chat-details[open] .analysis-chat-summary {
+    border-bottom: 1px solid var(--border-color);
+}
+.analysis-chat-details > .analysis-chat {
+    padding: 1.25rem 1.5rem 1.5rem;
+}
+
+/* ── Panel "Explorá tu grabación" — UNIFICADO ─────────────────────
+   Un solo card contiene el reproductor (waveform + transporte + leyenda)
+   y el chat de NeuralJam. Sin gap entre ambos: se leen como una sola
+   herramienta interactiva ("escuchá → marcá → preguntá"). */
+.analysis-explore {
+    background:
+        linear-gradient(
+            160deg,
+            color-mix(in srgb, var(--accent-blue) 5%, var(--bg-secondary)) 0%,
+            var(--bg-secondary) 55%,
+            color-mix(in srgb, var(--bg-primary) 30%, var(--bg-secondary)) 100%
+        );
+    border: 1px solid color-mix(in srgb, var(--accent-blue) 24%, var(--border-color));
+    border-radius: 16px;
+    box-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.03) inset,
+        0 10px 30px rgba(0, 0, 0, 0.26);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.analysis-explore__header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    padding: 1rem 1.25rem 0.75rem;
+}
+.analysis-explore__label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    color: var(--text-primary);
+    font-size: 0.82rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+.analysis-explore__label i {
+    color: var(--accent-blue);
+    font-size: 0.85rem;
+}
+.analysis-explore__hint {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+
+.analysis-explore__player {
+    padding: 0.25rem 1.25rem 1.15rem;
+}
+.analysis-explore__player #analysis-wavesurfer {
+    background: rgba(0, 0, 0, 0.22);
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    border-radius: 8px;
+    padding: 0.4rem 0.5rem;
+    min-height: 130px;
+}
+.analysis-explore__player .analysis-transport {
+    margin-top: 0.65rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+    align-items: center;
+}
+.analysis-explore__player .waveform-legend {
+    margin-top: 0.6rem;
+    padding-top: 0.6rem;
+    border-top: 1px dashed rgba(255, 255, 255, 0.05);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+/* Chat como sección INFERIOR del mismo card — sin borde propio, sin
+   sombra, sin margen: solo un divisor sutil arriba y su propio padding. */
+.analysis-explore__chat {
+    background: transparent;
+    border: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 0;
+    box-shadow: none;
+    padding: 0;
+    margin: 0;
+    overflow: hidden;
+}
+.analysis-explore__chat .analysis-chat-summary {
+    padding: 0.85rem 1.25rem;
+}
+.analysis-explore__chat[open] .analysis-chat-summary {
+    background: rgba(255, 255, 255, 0.02);
+}
+.analysis-explore__chat > .analysis-chat {
+    padding: 0 1.25rem 1.25rem;
+}
+
+@media (max-width: 640px) {
+    .analysis-explore__header,
+    .analysis-explore__player { padding-left: 0.9rem; padding-right: 0.9rem; }
+    .analysis-explore__chat .analysis-chat-summary { padding: 0.75rem 0.9rem; }
+    .analysis-explore__chat > .analysis-chat { padding: 0 0.9rem 1rem; }
+    .analysis-explore__player .analysis-transport { gap: 0.4rem; font-size: 0.85rem; }
+}
+
+/* Reduce el aire entre el recorrido y el panel Explorar — antes eran
+   dos "bloques" separados; ahora se leen como continuación natural. */
+.analysis-secondary {
+    margin-top: 1.5rem;
+    padding-top: 1.25rem;
+}
+
+/* ── Cierre editorial: calibración + historial debajo del recorrido
+   ──────────────────────────────────────────────────────────────────
+   Se probó ponerlos en un sidebar 320px pero se sentían desconectados
+   del feedback: el historial pide ancho editorial (varias filas con
+   fecha + preview) y la calibración también respira mejor completa.
+   Vuelven al flujo vertical pero con separación y jerarquía claras:
+   divisor, eyebrow gris ("Tu historia de estudio"), luego los bloques. */
+
+.analysis-calibration,
+.analysis-history {
+    max-width: 68rem;
+    margin-left: 0;
+    margin-right: 0;
+}
+
+/* La primera de las dos secciones secundarias visibles marca el cierre
+   con un divisor y una etiqueta discreta arriba. Aplicamos el pattern
+   sobre ambas y neutralizamos si vienen sin la anterior via :first-of-type. */
+.analysis-calibration:not(.hidden),
+.analysis-history {
+    position: relative;
+    margin-top: 3.5rem;
+    padding-top: 2rem;
+}
+.analysis-calibration:not(.hidden)::before,
+.analysis-history::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(
+        to right,
+        rgba(255, 255, 255, 0.09) 0%,
+        rgba(255, 255, 255, 0.02) 100%
+    );
+}
+/* Cuando ambas conviven, la segunda solo separa con un aire más chico
+   y sin línea propia — se lee como continuación del mismo bloque. */
+.analysis-calibration:not(.hidden) + .analysis-history {
+    margin-top: 2.25rem;
+    padding-top: 0;
+}
+.analysis-calibration:not(.hidden) + .analysis-history::before { display: none; }
+
+/* Historial — layout más editorial: título como eyebrow + subtítulo, y
+   cards con más aire para que se lean como filas de bitácora, no como
+   una grilla suelta. */
+.analysis-history .analysis-history-header {
+    margin-bottom: 1.25rem;
+}
+.analysis-history .analysis-history-header h3 {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: -0.005em;
+}
+.analysis-history .history-list {
+    gap: 0.75rem;
+    margin-top: 0;
+}
+.analysis-history .history-item {
+    padding: 1rem 1.15rem;
+    border-radius: 10px;
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    transition: border-color 0.18s, background 0.18s, transform 0.18s;
+}
+.analysis-history .history-item:hover {
+    background: var(--bg-secondary);
+    border-color: rgba(255, 255, 255, 0.12);
+    transform: none; /* quita el translateX(5px) que descuadra en columna */
+}
+.analysis-history .history-item .history-title {
+    font-weight: 500;
+    letter-spacing: -0.005em;
+}
+.analysis-history .history-item .history-date {
+    font-variant-numeric: tabular-nums;
+    font-size: 0.8rem;
+}
+.analysis-history .history-item .history-preview {
+    margin-top: 0.4rem;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+/* Calibración — mismo tratamiento editorial que el historial. */
+.analysis-calibration .analysis-calibration__header h3 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+}
+
+/* ── Micro-animación de entrada de cada paso ────────────────────── */
+@keyframes flowStepFadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+}
+.flow-step.is-visible {
+    animation: flowStepFadeIn 260ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+    .flow-step.is-visible { animation: none; }
+    .journey-rail__step,
+    .journey-rail__step .journey-rail__label,
+    .journey-rail__step .journey-rail__num,
+    .analysis-chat-summary__chevron { transition: none; }
+}
+
+/* ── Responsive fino ────────────────────────────────────────────── */
+@media (max-width: 900px) {
+    .analysis-flow { gap: 2rem; }
+    .flow-step[data-step="2"],
+    .flow-step[data-step="5"],
+    .flow-step[data-step="7"] {
+        padding: 1.25rem 1.15rem 1.35rem;
+    }
+    .flow-step[data-step="3"] .analysis-primary-focus__text {
+        font-size: 1.3rem;
+    }
+    .flow-step[data-step="9"] .analysis-next-goal__text {
+        font-size: 1.05rem;
+    }
+}
+@media (max-width: 640px) {
+    .analysis-flow { gap: 1.75rem; }
+    .flow-step__header { gap: 0.65rem; }
+    .flow-step__title { font-size: 1.05rem; }
+    .flow-step[data-step="3"] .analysis-primary-focus__text {
+        font-size: 1.2rem;
+    }
 }

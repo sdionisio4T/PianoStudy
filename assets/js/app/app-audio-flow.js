@@ -1596,6 +1596,192 @@ export const audioFlowMixin = {
         return await audioContext.decodeAudioData(arrayBuffer);
     },
 
+    // Recorrido en modo pestañas: solo el paso activo se muestra, el
+    // resto queda oculto por CSS. El rail horizontal de arriba y el pager
+    // inferior son los controles de navegación. Sincroniza:
+    //   · visibilidad de los ítems del rail según .hidden de cada paso
+    //   · paso activo (.is-current en el paso + .is-active en el rail)
+    //   · pager "Anterior / N de M / Siguiente"
+    //   · scroll horizontal del rail para que el activo quede visible
+    // Idempotente: registra listeners una sola vez (guard con
+    // _journeyRailInitialized), luego solo refresca.
+    _syncJourneyRail() {
+        const journey = document.querySelector('.analysis-journey');
+        const rail = document.querySelector('.journey-rail');
+        const flow = document.querySelector('.analysis-flow');
+        const steps = Array.from(document.querySelectorAll('.analysis-flow .flow-step[data-step]'));
+        if (!journey || !rail || !flow || !steps.length) return;
+
+        // Pager. Muestra "Paso NN · Título" usando el número semántico del
+        // data-step (mismo que la pastilla activa del rail — así no confunden).
+        // Se inserta JUSTO DESPUÉS del rail (arriba del contenido) para que
+        // los controles Anterior/Siguiente estén siempre visibles cerca del
+        // rail, en vez de quedar perdidos abajo del paso activo.
+        let pager = journey.querySelector('.journey-pager');
+        if (!pager) {
+            pager = document.createElement('div');
+            pager.className = 'journey-pager';
+            pager.innerHTML = `
+                <button type="button" class="journey-pager__btn" data-pager="prev" aria-label="Paso anterior">
+                    <i class="fas fa-chevron-left"></i><span>Anterior</span>
+                </button>
+                <span class="journey-pager__indicator" aria-live="polite">
+                    <strong data-pager="current">01</strong>
+                    <span data-pager="title" class="journey-pager__title"></span>
+                </span>
+                <button type="button" class="journey-pager__btn" data-pager="next" aria-label="Paso siguiente">
+                    <span>Siguiente</span><i class="fas fa-chevron-right"></i>
+                </button>
+            `;
+            // Insertamos el pager justo antes del panel Explorar (si existe)
+            // o antes del flow — así el orden final es:
+            //   rail → pager → explorar → contenido de los pasos.
+            const explore = journey.querySelector('.analysis-explore');
+            journey.insertBefore(pager, explore || flow);
+        }
+
+        // Paleta del pager por paso (matchea --step-accent / --rail-accent).
+        const PAGER_COLORS = {
+            '1': '#4ec4ff', '2': '#a970ff', '3': 'var(--accent-orange)',
+            '4': '#ffd60a', '5': 'var(--accent-green)', '6': '#38e8b8',
+            '7': '#a970ff', '8': '#4ec4ff', '9': '#ff5b8a',
+        };
+
+        // Razón por la que un paso puede quedar oculto (los renderers ponen
+        // .hidden en la <section> cuando no hay datos). El texto se muestra
+        // como tooltip en la pastilla y como mensaje en el pager si el
+        // usuario intenta abrir un paso deshabilitado.
+        const HIDDEN_REASONS = {
+            '1': 'No completaste la autoevaluación previa antes de analizar.',
+            '2': 'El análisis no generó evidencia visible.',
+            '3': 'El análisis no identificó un hallazgo principal.',
+            '4': 'El modelo no propuso una pregunta de reflexión esta vez.',
+            '5': 'El análisis no incluyó ejercicio de práctica.',
+            '6': 'El paso "después de practicar" está siempre disponible.',
+            '7': 'Todavía no grabaste tu toma B (después del experimento).',
+            '8': 'El modelo no devolvió observaciones detalladas.',
+            '9': 'El modelo no propuso un próximo paso concreto.',
+        };
+
+        const visibleSteps = () => steps.filter(s => !s.classList.contains('hidden'));
+
+        const setActive = (stepNum) => {
+            const list = visibleSteps();
+            if (!list.length) return;
+            const target = list.find(s => s.getAttribute('data-step') === String(stepNum)) || list[0];
+
+            steps.forEach(s => s.classList.remove('is-current'));
+            target.classList.add('is-current');
+
+            rail.querySelectorAll('.journey-rail__step').forEach(item => {
+                item.classList.toggle(
+                    'is-active',
+                    item.getAttribute('data-rail-step') === target.getAttribute('data-step'),
+                );
+            });
+
+            const idx = list.indexOf(target);
+            const stepNumRaw = target.getAttribute('data-step');
+            const cur = pager.querySelector('[data-pager="current"]');
+            const ttl = pager.querySelector('[data-pager="title"]');
+            const prev = pager.querySelector('[data-pager="prev"]');
+            const next = pager.querySelector('[data-pager="next"]');
+            // Pintamos "Paso NN" con dos dígitos para que coincida visualmente
+            // con las pastillas del rail (01, 02, 03…).
+            if (cur) cur.textContent = String(stepNumRaw).padStart(2, '0');
+            if (ttl) ttl.textContent = target.querySelector('.flow-step__title')?.textContent?.trim() || '';
+            if (prev) prev.disabled = idx <= 0;
+            if (next) next.disabled = idx >= list.length - 1;
+            // Color del pager tomando el acento del paso activo.
+            pager.style.setProperty('--pager-accent', PAGER_COLORS[stepNumRaw] || 'var(--accent-blue)');
+
+            // Centra el ítem activo del rail en pantallas donde no entra todo.
+            const activeRailItem = rail.querySelector(
+                `.journey-rail__step[data-rail-step="${target.getAttribute('data-step')}"]`,
+            );
+            activeRailItem?.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+        };
+
+        const refresh = () => {
+            steps.forEach(s => {
+                const num = s.getAttribute('data-step');
+                const isHidden = s.classList.contains('hidden');
+                const item = rail.querySelector(`.journey-rail__step[data-rail-step="${num}"]`);
+                if (!item) return;
+                // Todas las pastillas quedan VISIBLES. Las que no tienen datos
+                // se marcan como .is-disabled con la razón en tooltip nativo.
+                item.classList.toggle('is-disabled', isHidden);
+                if (isHidden) {
+                    item.setAttribute('aria-disabled', 'true');
+                    item.setAttribute('title', HIDDEN_REASONS[num] || 'Sin datos para este paso.');
+                    item.dataset.hiddenReason = HIDDEN_REASONS[num] || 'Sin datos para este paso.';
+                } else {
+                    item.removeAttribute('aria-disabled');
+                    item.removeAttribute('title');
+                    delete item.dataset.hiddenReason;
+                }
+                if (item.parentElement) item.parentElement.classList.remove('is-hidden');
+            });
+            // Si el paso activo dejó de estar visible, saltar al primer disponible.
+            const list = visibleSteps();
+            const stillCurrent = list.find(s => s.classList.contains('is-current'));
+            if (!stillCurrent && list.length) setActive(list[0].getAttribute('data-step'));
+        };
+
+        // Cada vez que se muestran resultados, arrancamos en el primer paso
+        // visible (el usuario espera empezar por 01, no seguir donde lo dejó
+        // un análisis anterior).
+        const first = visibleSteps()[0];
+        if (first) setActive(first.getAttribute('data-step'));
+        else refresh();
+
+        if (this._journeyRailInitialized) return;
+        this._journeyRailInitialized = true;
+
+        rail.addEventListener('click', (ev) => {
+            const a = ev.target.closest('.journey-rail__step');
+            if (!a) return;
+            ev.preventDefault();
+            // Pastilla deshabilitada (paso sin datos): mostrar la razón en el
+            // indicador del pager en vez de intentar activar el paso.
+            if (a.classList.contains('is-disabled')) {
+                const num = a.getAttribute('data-rail-step');
+                const reason = a.dataset.hiddenReason || HIDDEN_REASONS[num] || 'Sin datos para este paso.';
+                const ttl = pager.querySelector('[data-pager="title"]');
+                const cur = pager.querySelector('[data-pager="current"]');
+                if (cur) cur.textContent = String(num).padStart(2, '0');
+                if (ttl) ttl.textContent = reason;
+                pager.classList.add('is-showing-reason');
+                clearTimeout(this._pagerReasonTimer);
+                this._pagerReasonTimer = setTimeout(() => {
+                    pager.classList.remove('is-showing-reason');
+                    // Restaurar el paso activo real
+                    const list = visibleSteps();
+                    const current = list.find(s => s.classList.contains('is-current'));
+                    if (current) setActive(current.getAttribute('data-step'));
+                }, 3200);
+                return;
+            }
+            setActive(a.getAttribute('data-rail-step'));
+        });
+
+        pager.addEventListener('click', (ev) => {
+            const btn = ev.target.closest('[data-pager]');
+            if (!btn || btn.disabled) return;
+            const kind = btn.getAttribute('data-pager');
+            if (kind !== 'prev' && kind !== 'next') return;
+            const list = visibleSteps();
+            const currentIdx = list.findIndex(s => s.classList.contains('is-current'));
+            if (kind === 'prev' && currentIdx > 0) setActive(list[currentIdx - 1].getAttribute('data-step'));
+            if (kind === 'next' && currentIdx < list.length - 1) setActive(list[currentIdx + 1].getAttribute('data-step'));
+        });
+
+        // Cuando un renderer oculta/muestra un paso (p.ej. paso 07 aparece
+        // al grabar toma B), re-sincroniza rail + pager.
+        const mo = new MutationObserver(refresh);
+        steps.forEach(s => mo.observe(s, { attributes: true, attributeFilter: ['class'] }));
+    },
+
     displayAnalysisResults() {
         if (!this.currentAnalysis) return;
         const { audioAnalysis, aiAnalysis } = this.currentAnalysis;
@@ -1757,12 +1943,20 @@ export const audioFlowMixin = {
         // que ve el pianista antes del reproductor y el chat.
         this._renderMetacognitiveQuestion(aiAnalysis?.metacognitiveQuestion || '');
 
-        // Reproductor WaveSurfer con regiones para los momentos que marcó la IA.
+        // Reproductor WaveSurfer con regiones — vive siempre visible en el
+        // dock (#analysis-player-dock) arriba del chat, así que su contenedor
+        // ya tiene dimensiones reales al inicializar. No hace falta activar
+        // temporalmente ningún paso del recorrido.
         this._initAnalysisWavesurfer();
 
         // Reset chat
         this.analysisChat = [];
         this.renderAnalysisChat();
+
+        // Rail: refresca visibilidad según qué pasos quedaron ocultos por los
+        // renderers (paso 01 sin selfEval, 04 sin metaq, 07 sin toma B, 08 sin
+        // observaciones, 09 sin nextGoal). Primera llamada monta observers.
+        this._syncJourneyRail();
     },
 
     _initAnalysisWavesurfer() {
@@ -1876,12 +2070,9 @@ export const audioFlowMixin = {
             barRadius: 2,
             normalize: true,
             plugins: [
-                TimelinePlugin.create({
-                    container: '#analysis-wavesurfer-timeline',
-                    height: 22,
-                    insertPosition: 'beforebegin',
-                    style: { color: textSecondary, fontSize: '11px' },
-                }),
+                // TimelinePlugin removido — la regla superpuesta al card se
+                // veía desconectada del contenido. El transporte
+                // (analysis-time-label) ya muestra el tiempo actual.
                 HoverPlugin.create({
                     lineColor: textPrimary,
                     lineWidth: 1,
