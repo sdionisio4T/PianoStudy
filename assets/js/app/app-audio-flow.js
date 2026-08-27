@@ -1633,11 +1633,11 @@ export const audioFlowMixin = {
                     <span>Siguiente</span><i class="fas fa-chevron-right"></i>
                 </button>
             `;
-            // Insertamos el pager justo antes del panel Explorar (si existe)
-            // o antes del flow — así el orden final es:
-            //   rail → pager → explorar → contenido de los pasos.
-            const explore = journey.querySelector('.analysis-explore');
-            journey.insertBefore(pager, explore || flow);
+            // Insertamos el pager justo antes del flow (contenido de los pasos)
+            // — así queda pegado al rail arriba, independiente de dónde esté
+            // el panel Explorar. Orden final:
+            //   rail → pager → tarjetas 01..09 → panel Explorar.
+            journey.insertBefore(pager, flow);
         }
 
         // Paleta del pager por paso (matchea --step-accent / --rail-accent).

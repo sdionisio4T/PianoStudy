@@ -723,75 +723,6 @@
                                 </ol>
                             </nav>
 
-                            <!-- Panel "Explorar" UNIFICADO: reproductor + chat NeuralJam en
-                                 un solo card. Vive DENTRO de .analysis-journey, entre el
-                                 rail/pager y el contenido de los pasos — así siempre está a
-                                 mano al leer cualquier paso, sin bajar a otra sección.
-                                 Los IDs internos (analysis-wavesurfer, analysis-play-btn,
-                                 analysis-chat-*) no cambian; el JS no se toca. -->
-                            <section class="analysis-explore">
-                                <header class="analysis-explore__header">
-                                    <span class="analysis-explore__label">
-                                        <i class="fas fa-headphones"></i>
-                                        Explorá tu grabación
-                                    </span>
-                                    <span class="analysis-explore__hint">Click en una región para saltar · arrastrá sobre la onda para seleccionar un fragmento · después preguntá.</span>
-                                </header>
-
-                                <div class="analysis-explore__player" id="analysis-player-dock">
-                                    <div id="analysis-wavesurfer" class="analysis-wavesurfer"></div>
-                                    <div id="analysis-wavesurfer-timeline" class="analysis-wavesurfer-timeline"></div>
-                                    <div class="analysis-transport">
-                                        <button id="analysis-play-btn" class="btn-secondary">
-                                            <i class="fas fa-play"></i>
-                                            <span data-role="analysis-play-label">Play</span>
-                                        </button>
-                                        <button id="analysis-play-region-btn" class="btn-secondary" hidden>
-                                            <i class="fas fa-repeat"></i> Loop fragmento
-                                        </button>
-                                        <button id="analysis-clear-region-btn" class="btn-secondary" hidden>
-                                            <i class="fas fa-xmark"></i> Limpiar
-                                        </button>
-                                        <span id="analysis-time-label" class="analysis-time-label">0:00.00 / 0:00.00</span>
-                                        <span id="analysis-moment-note" class="analysis-moment-note"></span>
-                                    </div>
-                                    <div class="waveform-legend">
-                                        <span class="legend-item"><span class="legend-color good"></span> Bien</span>
-                                        <span class="legend-item"><span class="legend-color improve"></span> A mejorar</span>
-                                        <span class="legend-item"><span class="legend-color neutral"></span> Neutral</span>
-                                        <span class="legend-item"><span class="legend-color user"></span> Tu selección</span>
-                                    </div>
-                                </div>
-
-                                <details class="analysis-explore__chat analysis-chat-details">
-                                    <summary class="analysis-chat-summary">
-                                        <span class="analysis-chat-summary__prompt">
-                                            <span class="neuraljam-orb" aria-hidden="true"></span>
-                                            <span class="analysis-chat-summary__title">¿Querés profundizar?</span>
-                                            <span class="analysis-chat-summary__cta">Pregúntale a NeuralJam</span>
-                                        </span>
-                                        <i class="fas fa-chevron-down analysis-chat-summary__chevron" aria-hidden="true"></i>
-                                    </summary>
-                                    <div class="analysis-chat">
-                                        <div id="analysis-chat-messages" class="chat-messages"></div>
-                                        <div id="analysis-chat-focus-chip" class="analysis-chat-focus-chip" hidden>
-                                            <i class="fas fa-crosshairs"></i>
-                                            <span>Preguntando sobre el fragmento <strong data-role="focus-range">0:00 – 0:00</strong></span>
-                                            <button type="button" class="focus-chip-clear" aria-label="Quitar fragmento">
-                                                <i class="fas fa-xmark"></i>
-                                            </button>
-                                        </div>
-                                        <div class="chat-input-row">
-                                            <textarea id="analysis-chat-input" rows="2" placeholder="Ej: ¿En qué partes me fui de tempo y cómo lo practico?"></textarea>
-                                            <button id="analysis-chat-send" class="btn-primary">
-                                                <i class="fas fa-paper-plane"></i> Enviar
-                                            </button>
-                                        </div>
-                                        <p class="chat-hint">Privacidad: no se envía tu audio. Solo métricas numéricas y tu pregunta.</p>
-                                    </div>
-                                </details>
-                            </section>
-
                         <div class="analysis-flow">
                             <!-- 01 · TU PERCEPCIÓN
                                  Se rellena desde currentAnalysis.selfEvaluation (rating,
@@ -1009,6 +940,76 @@
                                 </div>
                             </section>
                         </div>
+
+                            <!-- Panel "Explorar" UNIFICADO: reproductor + chat NeuralJam en
+                                 un solo card. Vive DENTRO de .analysis-journey, DEBAJO del
+                                 flujo de tarjetas — el pianista primero lee el recorrido
+                                 (percepción → evidencia → hallazgo → …) y luego encuentra
+                                 el reproductor + chat para explorar libremente.
+                                 Los IDs internos (analysis-wavesurfer, analysis-play-btn,
+                                 analysis-chat-*) no cambian; el JS no se toca. -->
+                            <section class="analysis-explore">
+                                <header class="analysis-explore__header">
+                                    <span class="analysis-explore__label">
+                                        <i class="fas fa-headphones"></i>
+                                        Explorá tu grabación
+                                    </span>
+                                    <span class="analysis-explore__hint">Click en una región para saltar · arrastrá sobre la onda para seleccionar un fragmento · después preguntá.</span>
+                                </header>
+
+                                <div class="analysis-explore__player" id="analysis-player-dock">
+                                    <div id="analysis-wavesurfer" class="analysis-wavesurfer"></div>
+                                    <div id="analysis-wavesurfer-timeline" class="analysis-wavesurfer-timeline"></div>
+                                    <div class="analysis-transport">
+                                        <button id="analysis-play-btn" class="btn-secondary">
+                                            <i class="fas fa-play"></i>
+                                            <span data-role="analysis-play-label">Play</span>
+                                        </button>
+                                        <button id="analysis-play-region-btn" class="btn-secondary" hidden>
+                                            <i class="fas fa-repeat"></i> Loop fragmento
+                                        </button>
+                                        <button id="analysis-clear-region-btn" class="btn-secondary" hidden>
+                                            <i class="fas fa-xmark"></i> Limpiar
+                                        </button>
+                                        <span id="analysis-time-label" class="analysis-time-label">0:00.00 / 0:00.00</span>
+                                        <span id="analysis-moment-note" class="analysis-moment-note"></span>
+                                    </div>
+                                    <div class="waveform-legend">
+                                        <span class="legend-item"><span class="legend-color good"></span> Bien</span>
+                                        <span class="legend-item"><span class="legend-color improve"></span> A mejorar</span>
+                                        <span class="legend-item"><span class="legend-color neutral"></span> Neutral</span>
+                                        <span class="legend-item"><span class="legend-color user"></span> Tu selección</span>
+                                    </div>
+                                </div>
+
+                                <details class="analysis-explore__chat analysis-chat-details">
+                                    <summary class="analysis-chat-summary">
+                                        <span class="analysis-chat-summary__prompt">
+                                            <span class="neuraljam-orb" aria-hidden="true"></span>
+                                            <span class="analysis-chat-summary__title">¿Querés profundizar?</span>
+                                            <span class="analysis-chat-summary__cta">Pregúntale a NeuralJam</span>
+                                        </span>
+                                        <i class="fas fa-chevron-down analysis-chat-summary__chevron" aria-hidden="true"></i>
+                                    </summary>
+                                    <div class="analysis-chat">
+                                        <div id="analysis-chat-messages" class="chat-messages"></div>
+                                        <div id="analysis-chat-focus-chip" class="analysis-chat-focus-chip" hidden>
+                                            <i class="fas fa-crosshairs"></i>
+                                            <span>Preguntando sobre el fragmento <strong data-role="focus-range">0:00 – 0:00</strong></span>
+                                            <button type="button" class="focus-chip-clear" aria-label="Quitar fragmento">
+                                                <i class="fas fa-xmark"></i>
+                                            </button>
+                                        </div>
+                                        <div class="chat-input-row">
+                                            <textarea id="analysis-chat-input" rows="2" placeholder="Ej: ¿En qué partes me fui de tempo y cómo lo practico?"></textarea>
+                                            <button id="analysis-chat-send" class="btn-primary">
+                                                <i class="fas fa-paper-plane"></i> Enviar
+                                            </button>
+                                        </div>
+                                        <p class="chat-hint">Privacidad: no se envía tu audio. Solo métricas numéricas y tu pregunta.</p>
+                                    </div>
+                                </details>
+                            </section>
                         </div><!-- /.analysis-journey -->
 
                         <!-- Secciones secundarias — separadas del recorrido principal
